@@ -1,0 +1,28 @@
+# OpenGantt systemd 服务单元（裸机部署方案使用）
+# 复制到 /etc/systemd/system/opengantt.service 后执行：
+#   sudo systemctl daemon-reload && sudo systemctl enable --now opengantt
+
+[Unit]
+Description=OpenGantt Gantt Chart Service (FastAPI + SQLite)
+After=network.target
+
+[Service]
+Type=simple
+# 部署目录与运行用户（按实际情况修改）
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/opengantt/backend
+# 虚拟环境路径（按实际情况修改）
+ExecStart=/opt/opengantt/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2
+Restart=always
+RestartSec=3
+
+# 环境变量（生产建议写在这里，而不是 .env）
+Environment=SERVE_FRONTEND=true
+Environment=SEED_DEMO_DATA=false
+Environment=FRONTEND_DIST=/opt/opengantt/frontend/dist
+# CORS_ORIGINS 同源部署无需额外放开；如前后端分离请改为你的前端域名
+# Environment=CORS_ORIGINS=https://gantt.example.com
+
+[Install]
+WantedBy=multi-user.target

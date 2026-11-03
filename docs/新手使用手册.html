@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenGantt 新手速用手册</title>
+<style>
+  :root {
+    --ink: #1f2329;
+    --sub: #646a73;
+    --line: #e5e7eb;
+    --brand: #2f6bff;
+    --brand-weak: #eef3ff;
+    --ok: #0a8a4a;
+    --ok-weak: #e8f7ef;
+    --warn: #b25e00;
+    --warn-weak: #fff4e5;
+    --card: #ffffff;
+    --bg: #f6f7f9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--ink); line-height: 1.7; padding: 24px 14px 60px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  header.hero { text-align: center; margin-bottom: 26px; }
+  header.hero h1 { font-size: 26px; letter-spacing: 1px; }
+  header.hero p { color: var(--sub); font-size: 14px; margin-top: 6px; }
+  section { margin-bottom: 22px; }
+  h2 {
+    font-size: 19px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  h2 .bar { width: 5px; height: 20px; border-radius: 3px; background: var(--brand); display: inline-block; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; margin-bottom: 12px;
+  }
+  .card h3 { font-size: 15.5px; margin-bottom: 8px; }
+  .steps { list-style: none; counter-reset: s; }
+  .steps li {
+    counter-increment: s; position: relative; padding-left: 32px; margin: 7px 0; font-size: 14.5px;
+  }
+  .steps li::before {
+    content: counter(s); position: absolute; left: 0; top: 3px;
+    width: 22px; height: 22px; border-radius: 50%; background: var(--brand-weak);
+    color: var(--brand); font-size: 12.5px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tip {
+    font-size: 13px; color: var(--sub); background: var(--brand-weak);
+    border-radius: 8px; padding: 8px 12px; margin-top: 10px;
+  }
+  .tip b { color: var(--brand); }
+  .note {
+    font-size: 13px; color: var(--warn); background: var(--warn-weak);
+    border-radius: 8px; padding: 8px 12px; margin-top: 10px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; background: var(--card); }
+  th, td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; }
+  th { background: #fafbfc; font-weight: 600; }
+  details {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 8px;
+  }
+  details summary { cursor: pointer; font-weight: 600; font-size: 14.5px; }
+  details p { font-size: 14px; color: #3c4148; margin-top: 8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .mini { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .mini h3 { font-size: 15px; margin-bottom: 6px; }
+  .mini ol { padding-left: 20px; font-size: 13.5px; color: #3c4148; }
+  .mini ol li { margin: 4px 0; }
+  footer { text-align: center; color: var(--sub); font-size: 12.5px; margin-top: 30px; }
+  kbd {
+    background: #fff; border: 1px solid #d0d5dd; border-bottom-width: 2px; border-radius: 5px;
+    padding: 0 6px; font-size: 12.5px; font-family: inherit;
+  }
+  @media print {
+    body { background: #fff; padding: 0; }
+    .card, .mini, details { break-inside: avoid; border-color: #ddd; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>📋 OpenGantt 新手速用手册</h1>
+  <p>不需要懂电脑技术 · 跟着数字点就行 · 约 5 分钟看完</p>
+</header>
+
+<!-- ======== 上手 ======== -->
+<section>
+  <h2><span class="bar"></span>一、三步开始用</h2>
+  <div class="card">
+    <ol class="steps">
+      <li>打开浏览器（推荐 Chrome 或 Edge）</li>
+      <li>地址栏输入管理员给的网址（如 <kbd>192.168.1.100</kbd>），回车</li>
+      <li>输入账号密码，点「登录」</li>
+    </ol>
+    <div class="tip"><b>打开不了？</b>必须连接公司网络（在家先连公司 VPN）。忘记密码找管理员重置。</div>
+  </div>
+</section>
+
+<!-- ======== 每天必做 ======== -->
+<section>
+  <h2><span class="bar"></span>二、每天要做的三件事</h2>
+
+  <div class="card">
+    <h3>1️⃣ 更新任务进度 + 填一句话说明</h3>
+    <ol class="steps">
+      <li>点部门卡片 → 点你的项目 → 在任务表格找到你的任务（可点「我的任务」快速筛选）</li>
+      <li>在「进度」栏选新的百分比</li>
+      <li>点该行最左边的 <b>▶ 箭头</b> 展开，在「我的进度说明」写一句话（如"完成初稿，等审核"），然后<b>点一下页面其他位置</b>即自动保存</li>
+    </ol>
+    <div class="note">说明<b>按人独立</b>：多人负责同一任务时，各自填各自的，互相看不到、覆盖不了——这是隐私设计。</div>
+  </div>
+
+  <div class="card">
+    <h3>2️⃣ 打卡每日任务（每天重复的事，如晨会、发日报）</h3>
+    <ol class="steps">
+      <li>进部门页 → 点「📋 每日任务」页签</li>
+      <li>首次使用：顶部输入框输入名称 → 点「＋ 添加」（建一次，每天自动出现）</li>
+      <li>今天做完了：勾选该行「今日完成」方框 → 自动写入今天的工作日志</li>
+    </ol>
+    <div class="tip"><b>第二天对勾自动清空是正常的</b>——表示"今天的还没做"，任务和说明都还在。可在「我的说明」栏填写该任务的说明（同样按人独立）。</div>
+  </div>
+
+  <div class="card">
+    <h3>3️⃣ 补充工作日志（可选，但建议写）</h3>
+    <ol class="steps">
+      <li>点右上角「📋 我的工作日志」→ 弹出当天日志</li>
+      <li><b>四、关键决策</b>框：每行写一条今天拍板的事 → 点「保存关键决策」</li>
+      <li><b>五、补充事项</b>框：记录临时发生的事（如"今天张总找我开会"）→ 点「保存补充事项」</li>
+    </ol>
+    <div class="tip">完成后点「复制全文」就能把日志发给任何人。每天 <b>17:30</b> 系统自动归档当天日志（配置了企微群的话，群里同时收到简报）。</div>
+  </div>
+</section>
+
+<!-- ======== 偶尔要用 ======== -->
+<section>
+  <h2><span class="bar"></span>三、偶尔要用的操作</h2>
+  <div class="grid">
+    <div class="mini">
+      <h3>➕ 新建任务</h3>
+      <ol>
+        <li>打开项目 → 右上角「＋ 新增任务」</li>
+        <li>填任务名、起止日期（点日历选）</li>
+        <li>勾选负责人（可多人）、需要的话勾前置任务</li>
+        <li>点「创建」，甘特图上立即出现新横条</li>
+      </ol>
+    </div>
+    <div class="mini">
+      <h3>👤 请假 / 出差报备</h3>
+      <ol>
+        <li>点右上角自己的状态（默认"在岗"）</li>
+        <li>选：在岗 / 请假 / 休假 / 出差</li>
+        <li>统计日报时自动把你排除在外</li>
+      </ol>
+    </div>
+    <div class="mini">
+      <h3>🔑 修改密码</h3>
+      <ol>
+        <li>右上角「修改密码」</li>
+        <li>输原密码 → 新密码（至少 6 位）→ 再确认</li>
+        <li>保存后下次登录用新密码</li>
+      </ol>
+    </div>
+    <div class="mini">
+      <h3>📄 项目文档上传</h3>
+      <ol>
+        <li>项目内展开「项目进度文档」</li>
+        <li>选文件（单个 ≤ 20MB）+ 可写备注</li>
+        <li>上传后团队成员都能下载</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ======== 身份权限 ======== -->
+<section>
+  <h2><span class="bar"></span>四、三种身份能做什么</h2>
+  <table>
+    <tr><th>身份</th><th>能看到的</th><th>挑负责人范围</th></tr>
+    <tr><td>普通员工</td><td>自己负责的项目和任务</td><td>只能选<b>本部门</b>同事</td></tr>
+    <tr><td>部门主管</td><td>本部门全部项目（可编辑）</td><td>不限部门</td></tr>
+    <tr><td>管理员</td><td>全部 + 管理后台</td><td>不限部门</td></tr>
+  </table>
+</section>
+
+<!-- ======== FAQ ======== -->
+<section>
+  <h2><span class="bar"></span>五、常见问题</h2>
+  <details>
+    <summary>网页打不开？</summary>
+    <p>先确认连了公司网络（在家先连 VPN）；再核对网址；自己电脑启动的话，确认黑色终端窗口还开着、地址用 127.0.0.1:8000。</p>
+  </details>
+  <details>
+    <summary>忘记密码？</summary>
+    <p>联系管理员在后台「重置密码」，拿临时密码登录后自己再改一个新的。</p>
+  </details>
+  <details>
+    <summary>登录后看不到某些项目？</summary>
+    <p>正常——普通员工只看到自己负责的项目。需要参与时，请主管把相关任务分配给你。</p>
+  </details>
+  <details>
+    <summary>填完说明好像没保存？</summary>
+    <p>说明在"离开输入框"时才保存：输完后<b>点一下页面其他位置或按回车</b>。刷新后内容还在就是保存成功。</p>
+  </details>
+  <details>
+    <summary>昨天勾的"今日完成"，今天怎么没了？</summary>
+    <p>正常。完成状态按天记录，每天自动清零，表示"今天的还没做"；任务和说明不会丢。</p>
+  </details>
+  <details>
+    <summary>甘特图的横条拖不动？</summary>
+    <p>设计如此——防误触。甘特图只用来"看"，所有修改都在左侧任务表格里做。</p>
+  </details>
+  <details>
+    <summary>文档上传失败？</summary>
+    <p>单个文件不能超过 20MB，太大就先压缩或拆分再传。</p>
+  </details>
+  <details>
+    <summary>提示"登录已过期"？</summary>
+    <p>重新登录即可，之前填的内容都已保存，不会丢。</p>
+  </details>
+</section>
+
+<footer>OpenGantt · 新手速用手册 · 2026 年 10 月版 · 界面如有细微差异以实际系统为准</footer>
+</div>
+</body>
+</html>

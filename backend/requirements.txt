@@ -1,0 +1,9 @@
+# OpenGantt 后端依赖：全部为免费开源组件（MIT/BSD/Apache 等宽松协议）
+# Python >= 3.11
+
+fastapi==0.143.1           # Web 框架（MIT）——含 Pydantic 数据校验
+uvicorn[standard]==0.54.0  # ASGI 服务器（BSD）
+SQLAlchemy==2.1.4          # ORM 与数据库访问（MIT）
+PyJWT==2.15.1              # JWT 令牌签发与校验（MIT）
+python-multipart==0.0.32   # 文件上传 multipart 解析（Apache-2.0）
+chinese-calendar==1.11.0   # 中国法定节假日/调休判断（简报推送日控制，MIT；每年需升级以获取新年度数据）

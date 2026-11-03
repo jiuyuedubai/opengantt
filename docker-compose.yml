@@ -1,0 +1,53 @@
+# OpenGantt 服务器编排：一体化单容器 + SQLite 数据卷
+#
+# 启动：   docker compose up -d --build
+# 查看日志：docker compose logs -f app
+# 停止：   docker compose down
+#
+# 如需切换到 PostgreSQL（可选，均为免费开源）：
+#   1. 取消下方 db 服务与 app.environment 中 DATABASE_URL 的注释
+#   2. docker compose up -d --build
+
+services:
+  app:
+    build: .
+    image: opengantt:latest
+    container_name: opengantt
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      SERVE_FRONTEND: "true"
+      SEED_DEMO_DATA: "true"
+      CORS_ORIGINS: "http://localhost:8000"
+      # 生产建议显式设置 JWT 密钥（未设置时会自动生成到数据卷中并持久化）
+      # JWT_SECRET: "change-me-to-a-long-random-string"
+      # 上传大小限制（MB）
+      # MAX_UPLOAD_MB: "20"
+      # PostgreSQL 模式（需先启用下方 db 服务）：
+      # DATABASE_URL: "postgresql+psycopg://opengantt:opengantt@db:5432/opengantt"
+    volumes:
+      - opengantt-data:/app/backend/data
+    depends_on: []
+      # - db
+
+  # 可选：PostgreSQL 数据库（免费开源，服务器长期运行建议启用）
+  # db:
+  #   image: postgres:16-alpine
+  #   container_name: opengantt-db
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: opengantt
+  #     POSTGRES_PASSWORD: opengantt
+  #     POSTGRES_DB: opengantt
+  #   volumes:
+  #     - opengantt-pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U opengantt"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+
+volumes:
+  opengantt-data:
+  # opengantt-pgdata:
