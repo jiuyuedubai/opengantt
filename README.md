@@ -4,6 +4,8 @@
 [Frappe Gantt](https://github.com/frappe/gantt) 甘特图引擎，后端为 FastAPI + SQLAlchemy，
 数据 100% 存在你自己的数据库中，**不依赖任何付费服务或第三方 API**。
 
+![OpenGantt 主页界面](docs/screenshot-home.png)
+
 ## 功能特性
 
 ### 页面导航
