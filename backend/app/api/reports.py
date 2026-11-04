@@ -13,6 +13,7 @@ from app.security import client_ip, get_current_user, require_roles
 from app.services import (
     _today_str,
     generate_daily_report,
+    generate_weekly_report,
     generate_user_history_report,
     get_auto_save_status,
     get_daily_decisions,
@@ -59,6 +60,29 @@ def daily_report(
         content=markdown,
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'inline; filename="worklog-{day}.md"'},
+    )
+
+
+@router.get("/weekly", summary="生成某周工作周报（默认本周；管理员可查看指定用户）")
+def weekly_report(
+    date: str = Query(default=None, description="该周内任意日期（YYYY-MM-DD），默认今天"),
+    user_id: int = Query(default=None, description="查看指定用户的周报（仅管理员）"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target = user
+    if user_id is not None:
+        if user.role != "admin":
+            raise PermissionDeniedError("仅管理员可查看他人的工作周报")
+        target = db.get(User, user_id)
+        if target is None:
+            raise NotFoundError("用户不存在")
+    day = _validate_date(date) if date else _today_str()
+    markdown = generate_weekly_report(db, target, day)
+    return Response(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Content-Disposition": f'inline; filename="weekly-{day}.md"'},
     )
 
 

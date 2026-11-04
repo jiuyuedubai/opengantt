@@ -284,3 +284,59 @@ class AuditLog(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
     user: Mapped[User | None] = relationship()
+
+
+class DocAccessGrant(Base):
+    """跨部门文档查询授权：员工申请（pending）→ 管理员批准/撤销。
+
+    生效条件 = status == "approved" 且未过期（expires_at 动态判断，到期自动失效，
+    无需定时任务）。用于扩展 _doc_visible_dept_ids 的部门可见范围。
+    """
+
+    __tablename__ = "doc_access_grants"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    department_id: Mapped[int] = mapped_column(ForeignKey("departments.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(String(12), default="pending", nullable=False)  # pending/approved/revoked
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    granted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utc_now)
+    decided_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+    user: Mapped[User | None] = relationship(foreign_keys=[user_id])
+    department: Mapped[Department | None] = relationship()
+
+
+class PerformanceTemplate(Base):
+    """绩效考核表模板：每位员工预存一份考核表文件，生成考核时直接调用。"""
+
+    __tablename__ = "performance_templates"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), unique=True, index=True)
+    original_name: Mapped[str] = mapped_column(String(255), default="")
+    stored_name: Mapped[str] = mapped_column(String(120), default="")
+    size: Mapped[int] = mapped_column(default=0)
+    content_type: Mapped[str] = mapped_column(String(120), default="")
+    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    uploaded_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utc_now)
+
+    user: Mapped[User | None] = relationship(foreign_keys=[user_id])
+
+
+class PerformanceResult(Base):
+    """绩效考核结果存档：按周期为员工自动生成的考核摘要与指标。"""
+
+    __tablename__ = "performance_results"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    period: Mapped[str] = mapped_column(String(10), default="", index=True)  # 如 2026-11
+    metrics: Mapped[str] = mapped_column(String(2000), default="")  # JSON：指标快照
+    summary: Mapped[str] = mapped_column(String(4000), default="")  # Markdown 考核摘要
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utc_now, index=True)
+
+    user: Mapped[User | None] = relationship(foreign_keys=[user_id])

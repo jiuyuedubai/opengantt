@@ -84,6 +84,7 @@ class TaskOut(_DateStrMixin):
     assignee_ids: list[int] = []
     status: str = "not_started"
     note: str = ""
+    blocked_reason: str = Field(default="", description="阻塞原因（仅阻塞状态有值，取最近一次转阻塞记录）")
     risk_level: str = "ok"
     risk_reasons: list[str] = []
     position: int

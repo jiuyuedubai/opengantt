@@ -21,7 +21,9 @@ def create_app() -> FastAPI:
     from app.api.auth import router as auth_router
     from app.api.daily_tasks import router as daily_tasks_router
     from app.api.departments import router as departments_router
+    from app.api.doc_access import router as doc_access_router
     from app.api.documents import router as documents_router
+    from app.api.performance import router as performance_router
     from app.api.projects import router as projects_router
     from app.api.reports import router as reports_router
     from app.api.search import router as search_router
@@ -49,6 +51,8 @@ def create_app() -> FastAPI:
     app.include_router(stats_router, tags=["stats"])
     app.include_router(search_router, tags=["search"])
     app.include_router(audit_router, tags=["audit"])
+    app.include_router(doc_access_router, tags=["doc-access"])
+    app.include_router(performance_router, tags=["performance"])
 
     @app.get("/api/health", tags=["system"], summary="健康检查")
     def health() -> dict:

@@ -62,17 +62,29 @@
               </select>
             </td>
             <td>
-              <select
-                v-if="rowEditable(t)"
-                class="status-select"
-                :class="'st-' + t.status"
-                :value="t.status"
-                :title="t.status === 'blocked' ? '阻塞中（转阻塞需填原因）' : ''"
-                @change="onStatusChange(t, $event.target.value)"
-              >
-                <option v-for="(label, key) in statusLabels" :key="key" :value="key">{{ label }}</option>
-              </select>
-              <span v-else class="status-text" :class="'st-' + t.status">{{ statusLabels[t.status] || t.status }}</span>
+              <div class="status-wrap">
+                <select
+                  v-if="rowEditable(t)"
+                  class="status-select"
+                  :class="'st-' + t.status"
+                  :value="t.status"
+                  :title="t.status === 'blocked' ? '阻塞中（转阻塞需填原因）' : ''"
+                  @change="onStatusChange(t, $event.target.value)"
+                >
+                  <option v-for="(label, key) in statusLabels" :key="key" :value="key">{{ label }}</option>
+                </select>
+                <span v-else class="status-text" :class="'st-' + t.status">{{ statusLabels[t.status] || t.status }}</span>
+                <button
+                  v-if="t.status === 'blocked' && rowEditable(t)"
+                  type="button"
+                  class="blocked-reason-btn"
+                  :title="'阻塞原因：' + (t.blocked_reason || '未填写') + '（点击查看/修改）'"
+                  @click="editBlockedReason(t)"
+                >📝</button>
+              </div>
+              <div v-if="t.status === 'blocked' && t.blocked_reason" class="blocked-reason-text" :title="t.blocked_reason">
+                ⛔ {{ t.blocked_reason }}
+              </div>
             </td>
             <td class="risk-cell">
               <span
@@ -172,6 +184,20 @@ function onStatusChange(task, value) {
     return;
   }
   emit("update", task, { status: value });
+}
+
+/** 查看/修改阻塞原因：blocked→blocked 提交新原因（后端追加一条状态日志，最近一条即当前原因） */
+function editBlockedReason(task) {
+  const current = task.blocked_reason || "";
+  const reason = window.prompt(
+    `「${task.name}」当前阻塞原因：\n${current || "（未填写）"}\n\n请输入新的阻塞原因（留空取消）：`,
+    current
+  );
+  if (reason === null) return; // 取消
+  const trimmed = reason.trim();
+  if (!trimmed) return;
+  if (trimmed === current) return; // 未变更
+  emit("update", task, { status: "blocked", status_reason: trimmed });
 }
 
 /** 行级编辑权限：项目可编辑（本部门成员/项目负责人/管理员），或该任务分配给了当前登录人（跨部门亦然） */
@@ -432,6 +458,30 @@ select:focus {
   margin-top: 6px;
   padding-top: 6px;
   border-top: 1px solid var(--border);
+}
+
+.status-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.blocked-reason-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+}
+
+.blocked-reason-text {
+  font-size: 11px;
+  color: #d46b08;
+  margin-top: 2px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-select,

@@ -379,6 +379,149 @@
         </table>
       </section>
 
+      <!-- 绩效考核 -->
+      <section v-if="tab === 'perf'" class="panel">
+        <h3 class="section-title">① 考核表模板库（每员工预存一份，生成考核时直接调用）</h3>
+        <div class="report-controls">
+          <select v-model.number="perfTplUser">
+            <option :value="null" disabled>选择员工…</option>
+            <option v-for="u in perfUsers" :key="u.id" :value="u.id">{{ u.display_name }}（{{ u.username }}）</option>
+          </select>
+          <input ref="perfFileInput" type="file" accept=".doc,.docx,.pdf,.xlsx,.xls" />
+          <button class="primary" :disabled="perfBusy || !perfTplUser" @click="uploadPerfTpl">上传/替换考核表</button>
+          <p class="report-hint">支持 doc/docx/pdf/xls/xlsx，单份 ≤ 20MB；同一员工重复上传将替换旧表。</p>
+        </div>
+        <table class="data-table">
+          <thead><tr><th>员工</th><th>文件名</th><th>大小</th><th>上传时间</th><th style="width: 150px">操作</th></tr></thead>
+          <tbody>
+            <tr v-if="!perfTemplates.length"><td colspan="5" class="empty-tip">暂无考核表模板</td></tr>
+            <tr v-for="t in perfTemplates" :key="t.id">
+              <td>{{ t.user_name }}</td>
+              <td class="mono" :title="t.original_name">{{ t.original_name }}</td>
+              <td>{{ (t.size / 1024).toFixed(1) }} KB</td>
+              <td class="mono">{{ t.uploaded_at }}</td>
+              <td>
+                <a class="mini" :href="`/api/admin/performance/templates/${t.id}/download`">下载</a>
+                <button class="mini danger" @click="removePerfTpl(t)">删除</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3 class="section-title">② 生成考核结果（勾选员工 → 自动聚合任务/日志数据 → 存档）</h3>
+        <div class="report-controls">
+          <input v-model="perfSearch" placeholder="🔍 搜索姓名 / 用户名" />
+          <label>考核周期 <input type="month" v-model="perfPeriod" /></label>
+          <button class="primary" :disabled="perfBusy || !perfSelected.length" @click="generatePerf">
+            ⚙️ 生成考核结果{{ perfSelected.length ? `（${perfSelected.length} 人）` : "" }}
+          </button>
+          <button :disabled="perfBusy" @click="exportPerfZip">📦 打包下载（{{ perfPeriod }}）</button>
+          <p class="report-hint">
+            自动汇总每位员工名下任务完成率、平均进度、逾期数、日志与每日任务提交天数，并<b>扫描其上传的全部文档</b>（含压缩包解压文件）；
+            同一员工同一周期重复生成将覆盖旧结果。综合评价默认留人工填写；
+            如需 AI 建议评分，直接在 WorkBuddy 对话中说「处理绩效 AI 评分」，由 WorkBuddy 助手远程扫描数据与文档后写回。
+          </p>
+        </div>
+        <div class="perf-pick">
+          <label v-for="u in perfPickUsers" :key="u.id" class="assignee-option">
+            <input type="checkbox" :value="u.id" v-model="perfSelected" />
+            <span>{{ u.display_name }}（{{ u.username }}）</span>
+          </label>
+        </div>
+
+        <h3 class="section-title">③ 考核结果存档</h3>
+        <table class="data-table">
+          <thead><tr><th>周期</th><th>员工</th><th>任务总数</th><th>已完成</th><th>逾期</th><th>平均进度</th><th>日志天数</th><th>生成时间</th><th style="width: 110px">操作</th></tr></thead>
+          <tbody>
+            <tr v-if="!perfResults.length"><td colspan="9" class="empty-tip">暂无考核结果</td></tr>
+            <tr v-for="r in perfResults" :key="r.id">
+              <td class="mono">{{ r.period }}</td>
+              <td>{{ r.user_name }}</td>
+              <td>{{ r.metrics.task_total ?? 0 }}</td>
+              <td>{{ r.metrics.task_done ?? 0 }}</td>
+              <td :class="{ 'perf-overdue': (r.metrics.task_overdue ?? 0) > 0 }">{{ r.metrics.task_overdue ?? 0 }}</td>
+              <td>{{ r.metrics.avg_progress ?? 0 }}%</td>
+              <td>{{ r.metrics.log_days ?? 0 }}</td>
+              <td class="mono">{{ r.created_at }}</td>
+              <td><a class="mini" :href="`/api/admin/performance/results/${r.id}/download`">下载摘要</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <!-- 文档权限：跨部门查询授权 -->
+      <section v-if="tab === 'docaccess'" class="panel">
+        <h3 class="section-title">① 直接授权（跳过申请流程，立即生效）</h3>
+        <div class="report-controls">
+          <select v-model.number="daGrantUser">
+            <option :value="null" disabled>选择员工…</option>
+            <option v-for="u in perfUsers" :key="u.id" :value="u.id">{{ u.display_name }}（{{ u.username }}）</option>
+          </select>
+          <select v-model.number="daGrantDept">
+            <option :value="null" disabled>目标部门…</option>
+            <option v-for="d in departments" :key="d.id" :value="d.id">{{ d.name }}</option>
+          </select>
+          <label>有效期至 <input type="datetime-local" v-model="daGrantUntil" /></label>
+          <button class="primary" :disabled="daBusy || !daGrantUser || !daGrantDept || !daGrantUntil" @click="doGrant">授权</button>
+          <p class="report-hint">到期自动失效（查询时动态判断，无需人工清理）；单次授权最长 365 天。</p>
+        </div>
+        <h3 class="section-title">② 员工申请与授权记录</h3>
+        <table class="data-table">
+          <thead><tr><th>申请人</th><th>目标部门</th><th>状态</th><th>有效期至</th><th>说明</th><th style="width: 180px">操作</th></tr></thead>
+          <tbody>
+            <tr v-if="!docGrants.length"><td colspan="6" class="empty-tip">暂无申请与授权记录</td></tr>
+            <tr v-for="g in docGrants" :key="g.id" :class="{ inactive: g.status === 'revoked' || g.expired }">
+              <td>{{ g.user_name }}</td>
+              <td>{{ g.department_name }}</td>
+              <td>
+                <span class="action-badge" :class="{ sensitive: g.status === 'pending' }">
+                  {{ g.status === "approved" && g.expired ? "已过期" : g.status_label }}
+                </span>
+              </td>
+              <td class="mono">{{ g.expires_at }}</td>
+              <td :title="g.note">{{ g.note || "—" }}</td>
+              <td>
+                <template v-if="g.status === 'pending'">
+                  <button class="mini primary" :disabled="daBusy" @click="decideGrant(g, 'approve')">批准</button>
+                  <button class="mini danger" :disabled="daBusy" @click="decideGrant(g, 'revoke')">拒绝</button>
+                </template>
+                <template v-else-if="g.status === 'approved' && !g.expired">
+                  <button class="mini danger" :disabled="daBusy" @click="decideGrant(g, 'revoke')">撤销</button>
+                </template>
+                <span v-else class="muted">—</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="report-hint">
+          权限逻辑：授权生效 = 状态「生效中」且未到期（到期自动失效）；员工在首页「进度文档」中可自助申请，
+          批准后其文档中心即可浏览目标部门的文档（下载同受控）；撤销即时失效。
+        </p>
+
+        <h3 class="section-title">③ 批量删除（按上传人 / 上传日期）</h3>
+        <div class="report-controls">
+          <select v-model.number="bdUserId">
+            <option :value="null">全部上传人</option>
+            <option v-for="u in perfUsers" :key="u.id" :value="u.id">{{ u.display_name }}（{{ u.username }}）</option>
+          </select>
+          <label>上传日期 <input type="date" v-model="bdDate" /></label>
+          <button class="primary" :disabled="bdBusy || (!bdUserId && !bdDate)" @click="queryBulk">🔍 查询将删除的文档</button>
+        </div>
+        <div v-if="bdStats" class="report-controls" style="flex-direction: column; align-items: flex-start">
+          <p class="report-hint" style="margin: 0">
+            匹配 <b>{{ bdStats.count }}</b> 份文档，共 <b>{{ (bdStats.total_size / 1024 / 1024).toFixed(1) }} MB</b>
+            （上传人：{{ bdStats.user_name }}；日期：{{ bdStats.date }}）
+          </p>
+          <ul class="muted" style="margin: 4px 0 0; padding-left: 18px; font-size: 12px">
+            <li v-for="s in bdStats.samples" :key="s">{{ s }}</li>
+            <li v-if="bdStats.count > bdStats.samples.length">…等共 {{ bdStats.count }} 份</li>
+          </ul>
+          <button class="danger" :disabled="bdBusy || !bdStats.count" @click="doBulkDelete">
+            🗑 删除以上 {{ bdStats.count }} 份文档
+          </button>
+        </div>
+      </section>
+
     </template>
 
     <ToastHost ref="toastRef" />
@@ -401,6 +544,8 @@ const tabs = [
   { key: "activity", label: "投入度分析" },
   { key: "audit", label: "操作日志" },
   { key: "backup", label: "数据备份" },
+  { key: "perf", label: "绩效考核" },
+  { key: "docaccess", label: "文档权限" },
 ];
 const stats = ref(null);
 const users = ref([]);
@@ -616,7 +761,179 @@ async function deleteSelected() {
 
 watch(tab, (t) => {
   if (t === "backup" && !backups.value.length) loadBackups();
+  if (t === "perf") loadPerf();
+  if (t === "docaccess") loadDocGrants();
 });
+
+// ---------- 绩效考核 ----------
+const perfTemplates = ref([]);
+const perfResults = ref([]);
+const perfBusy = ref(false);
+const perfTplUser = ref(null);
+const perfFileInput = ref(null);
+const perfSearch = ref("");
+const perfSelected = ref([]);
+const perfPeriod = ref(new Date().toISOString().slice(0, 7));
+
+const perfUsers = computed(() => users.value.filter((u) => u.is_active));
+const perfPickUsers = computed(() => {
+  const kw = perfSearch.value.trim().toLowerCase();
+  return perfUsers.value.filter(
+    (u) => !kw || `${u.display_name} ${u.username}`.toLowerCase().includes(kw)
+  );
+});
+
+async function loadPerf() {
+  try {
+    perfTemplates.value = await api.admin.listPerfTemplates();
+    perfResults.value = await api.admin.listPerfResults();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+async function uploadPerfTpl() {
+  const file = perfFileInput.value?.files?.[0];
+  if (!file) {
+    toastRef.value?.showError("请先选择考核表文件");
+    return;
+  }
+  perfBusy.value = true;
+  try {
+    const info = await api.admin.uploadPerfTemplate(perfTplUser.value, file);
+    toastRef.value?.showInfo(`已上传 ${info.user_name} 的考核表：${info.original_name}`);
+    if (perfFileInput.value) perfFileInput.value.value = "";
+    await loadPerf();
+  } catch (e) {
+    fail(e);
+  } finally {
+    perfBusy.value = false;
+  }
+}
+
+async function removePerfTpl(t) {
+  if (!window.confirm(`确定删除 ${t.user_name} 的考核表模板「${t.original_name}」？`)) return;
+  try {
+    await api.admin.deletePerfTemplate(t.id);
+    toastRef.value?.showInfo("考核表模板已删除");
+    await loadPerf();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+async function generatePerf() {
+  if (!perfSelected.value.length) return;
+  if (!window.confirm(`确认为选中的 ${perfSelected.value.length} 名员工生成 ${perfPeriod.value} 的考核结果？\n同一员工同一周期重复生成会覆盖旧结果。`)) return;
+  perfBusy.value = true;
+  try {
+    const list = await api.admin.generatePerf(perfSelected.value, perfPeriod.value);
+    toastRef.value?.showInfo(`已生成 ${list.length} 名员工的考核结果（${perfPeriod.value}）`);
+    perfSelected.value = [];
+    await loadPerf();
+  } catch (e) {
+    fail(e);
+  } finally {
+    perfBusy.value = false;
+  }
+}
+
+function exportPerfZip() {
+  window.open(`/api/admin/performance/results/export?period=${encodeURIComponent(perfPeriod.value)}`, "_blank");
+}
+
+// ---------- 跨部门文档查询授权（管理员） ----------
+const docGrants = ref([]);
+const daBusy = ref(false);
+const daGrantUser = ref(null);
+const daGrantDept = ref(null);
+const daGrantUntil = ref("");
+
+async function loadDocGrants() {
+  try {
+    docGrants.value = await api.admin.listDocAccess();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+async function doGrant() {
+  if (!window.confirm(`确认为该员工授权跨部门文档查询？\n有效期至 ${daGrantUntil.value}，到期自动失效。`)) return;
+  daBusy.value = true;
+  try {
+    await api.admin.grantDocAccess(daGrantUser.value, daGrantDept.value, daGrantUntil.value);
+    toastRef.value?.showInfo("授权成功，立即生效");
+    daGrantUser.value = null;
+    daGrantDept.value = null;
+    daGrantUntil.value = "";
+    await loadDocGrants();
+  } catch (e) {
+    fail(e);
+  } finally {
+    daBusy.value = false;
+  }
+}
+
+async function decideGrant(g, action) {
+  const isApprove = action === "approve";
+  const msg = isApprove
+    ? `批准 ${g.user_name} 查询「${g.department_name}」文档？\n有效期至 ${g.expires_at}（可接受该员工期望时长，之后可在下方撤销）。`
+    : `${isApprove ? "批准" : "拒绝/撤销"} ${g.user_name} 对「${g.department_name}」的查询申请？`;
+  if (!window.confirm(msg)) return;
+  daBusy.value = true;
+  try {
+    await api.admin.decideDocAccess(g.id, action, isApprove ? g.expires_at : null);
+    toastRef.value?.showInfo(isApprove ? "已批准并生效" : "已拒绝/撤销");
+    await loadDocGrants();
+  } catch (e) {
+    fail(e);
+  } finally {
+    daBusy.value = false;
+  }
+}
+
+// ---------- 文档批量删除（按上传人/日期） ----------
+const bdUserId = ref(null);
+const bdDate = ref("");
+const bdStats = ref(null);
+const bdBusy = ref(false);
+
+async function queryBulk() {
+  if (!bdUserId.value && !bdDate.value) {
+    toastRef.value?.showError("请先选择上传人或上传日期");
+    return;
+  }
+  bdBusy.value = true;
+  try {
+    bdStats.value = await api.admin.docBulkStats(bdUserId.value, bdDate.value);
+  } catch (e) {
+    fail(e);
+  } finally {
+    bdBusy.value = false;
+  }
+}
+
+async function doBulkDelete() {
+  if (!bdStats.value?.count) return;
+  if (
+    !window.confirm(
+      `⚠️ 确认删除 ${bdStats.user_name} 在 ${bdStats.date} 上传的 ${bdStats.count} 份文档？\n` +
+        `共 ${(bdStats.total_size / 1024 / 1024).toFixed(1)} MB，删除后不可恢复（员工需重新上传）。`
+    )
+  )
+    return;
+  bdBusy.value = true;
+  try {
+    const r = await api.admin.docBulkDelete(bdUserId.value, bdDate.value);
+    toastRef.value?.showInfo(`已删除 ${r.deleted} 份文档，释放 ${r.freed_mb} MB`);
+    bdStats.value = null;
+    await loadDocGrants();
+  } catch (e) {
+    fail(e);
+  } finally {
+    bdBusy.value = false;
+  }
+}
 
 async function fetchUserReport(mode) {
   reportBusy.value = true;
@@ -1029,6 +1346,41 @@ td.empty-row {
   text-align: center;
   color: var(--muted);
   padding: 24px 0;
+}
+
+/* 绩效考核 */
+.section-title {
+  margin: 6px 0 0;
+  font-size: 14px;
+}
+
+.perf-pick {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.perf-pick .assignee-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.perf-overdue {
+  color: #b00020;
+  font-weight: 600;
+}
+
+a.mini {
+  text-decoration: none;
+  margin-right: 4px;
 }
 
 .stat-cards {

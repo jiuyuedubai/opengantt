@@ -6,12 +6,14 @@
 - employee    仅自己负责的项目（owner_id == 本人）
 """
 
+import re
 import secrets
 import datetime as dt
+import io
 import logging
 from pathlib import Path
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -23,7 +25,10 @@ from app.models import (
     DailyTask,
     DailyTaskAssignee,
     Department,
+    DocAccessGrant,
     Document,
+    PerformanceResult,
+    PerformanceTemplate,
     ProgressLog,
     Project,
     Task,
@@ -280,9 +285,11 @@ def update_project(db: Session, user: User, project_id: int, payload: ProjectUpd
             project.owner_id = payload.owner_id
         if payload.department_id is not None:
             project.department_id = payload.department_id
-        # expire_on_commit=False：改部门/负责人后显式刷新，避免返回缓存的旧关联
-        db.refresh(project)
     db.commit()
+    # expire_on_commit=False：改部门/负责人后显式刷新（必须在 commit 之后，
+    # 否则会用数据库旧值覆盖内存中刚赋的新值）
+    if user.role == "admin" and (payload.owner_id is not None or payload.department_id is not None):
+        db.refresh(project)
     return _project_out(db, project, user)
 
 
@@ -519,8 +526,15 @@ def update_task(db: Session, user: User, project_id: int, task_id: int, payload:
     _validate_date_order(payload.start_date or task.start_date, payload.end_date or task.end_date)
     old_status = task.status
     pending: dict[int, list[int]] = {}
+    # 阻塞原因修订：任务已是 blocked 且本次带新的 status_reason → 也视为一次状态记录（原因修订）
+    reason_revision = (
+        payload.status is not None
+        and payload.status == "blocked"
+        and old_status == "blocked"
+        and bool((payload.status_reason or "").strip())
+    )
     apply_task_update(db, task, payload, pending, operator=user)
-    if payload.status is not None and payload.status != old_status:
+    if payload.status is not None and (payload.status != old_status or reason_revision):
         _apply_status_change(db, user, task, old_status, payload)
     if payload.dependencies is not None:
         _assert_no_cycle(db, project_id, task_id, pending)
@@ -574,8 +588,8 @@ DOC_DEPT_GRANTS = {"商务运营部": ["项管中心"]}
 
 def _doc_visible_dept_ids(db: Session, user: User) -> set[int] | None:
     """可查看文档的部门 ID 集合；管理员返回 None = 全部部门。
-    规则：普通用户（含主管）可见其所属（任一）部门 + 专项授权部门
-    （如商务运营部可看项管中心）。"""
+    规则：普通用户（含主管）可见其所属（任一）部门 + 硬编码专项授权部门
+    （如商务运营部可看项管中心）+ 已批准且未过期的跨部门查询授权部门。"""
     if user.role == "admin":
         return None
     allowed = _user_dept_ids(db, user)
@@ -594,6 +608,16 @@ def _doc_visible_dept_ids(db: Session, user: User) -> set[int] | None:
                 ).scalar_one_or_none()
                 if d is not None:
                     allowed.add(d.id)
+    # 员工跨部门文档查询授权：已批准且未过期（到期自动失效，动态判断无需定时任务）
+    now = dt.datetime.now()
+    granted_ids = db.execute(
+        select(DocAccessGrant.department_id).where(
+            DocAccessGrant.user_id == user.id,
+            DocAccessGrant.status == "approved",
+            DocAccessGrant.expires_at > now,
+        )
+    ).scalars().all()
+    allowed.update(granted_ids)
     return allowed
 
 
@@ -657,6 +681,145 @@ def save_document(db: Session, user: User, project_id: int, original_name: str, 
     return doc
 
 
+# 压缩包上传限制：防 zip 炸弹与超大解压
+ZIP_MAX_ENTRIES = 1000                   # 压缩包内最多文件数
+ZIP_MAX_TOTAL_BYTES = 500 * 1024 * 1024  # 解压后总大小上限 500MB
+ZIP_MAX_ARCHIVE_BYTES = 500 * 1024 * 1024  # zip 包本身上限（与 nginx 500m 对齐）
+ZIP_MAX_INNER_BYTES = 100 * 1024 * 1024  # 压缩包内单个文件上限
+BULK_MAX_FILES = 200                     # 单次批量上传（含文件夹展开）最多文件数
+_ALLOWED_ARCHIVE_EXT = {".zip"}
+# macOS 压缩垃圾：__MACOSX 元数据目录、._ AppleDouble 文件、.DS_Store
+_ZIP_SKIP_DIR_PARTS = {"__MACOSX"}
+_ZIP_SKIP_NAME_PREFIXES = ("._", ".DS_Store")
+
+
+def _zip_inner_name(info) -> str:
+    """修复 zip 内文件名编码：无 UTF-8 标志位的条目依次尝试 cp437→utf-8、cp437→gbk。
+
+    实测 Mac/旧工具压缩的 zip 常不带 0x800 标志，zipfile 默认按 cp437 解码导致中文乱码；
+    原始字节多为 UTF-8（cp437→utf-8 还原），部分 Windows 工具为 GBK（cp437→gbk 还原）。
+    """
+    name = info.filename
+    if not (info.flag_bits & 0x800):
+        for enc in ("utf-8", "gbk"):
+            try:
+                return name.encode("cp437").decode(enc)
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+    return name
+
+
+def _zip_should_skip(name: str) -> bool:
+    parts = Path(name).parts
+    if any(p in _ZIP_SKIP_DIR_PARTS for p in parts):
+        return True
+    base = parts[-1] if parts else name
+    return base.startswith(_ZIP_SKIP_NAME_PREFIXES)
+
+
+def save_document_bulk(
+    db: Session, user: User, project_id: int,
+    uploads: list[tuple[str, bytes, str]],  # (original_name, content, content_type)
+    note: str,
+) -> list[Document]:
+    """批量保存文档：压缩包（zip）自动解压为独立文档（保留内部相对路径），其余原样入库。
+
+    员工可上传压缩包或整个文件夹；zip 内部每个文件成为一条独立 Document，
+    original_name 形如「压缩包名/内部路径/file.ext」，便于按人考核时扫描全部产出。
+    大压缩包（考核材料归档）不受单文件 20MB 限制，由包体/解压总量/条目数三层限制约束。
+    """
+    project = get_project(db, project_id)
+    ensure_can_edit_project(db, user, project)
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    if not uploads:
+        raise ValidationError("未选择任何文件")
+    if len(uploads) > BULK_MAX_FILES:
+        raise ValidationError(f"单次最多上传 {BULK_MAX_FILES} 个文件（当前 {len(uploads)} 个），请分批或改用 zip 压缩包")
+
+    # 分组前缀：部门-上传人-上传日期（如 财务部-何花-2026-11-04），
+    # 让批量/解压后的文件在文档列表里按人按日期自然聚拢，便于查找
+    dept_name = user.department.name if user.department else "未分部门"
+    uploader_name = user.display_name or user.username
+    prefix = f"{dept_name}-{uploader_name}-{dt.date.today():%Y-%m-%d}"
+
+    import zipfile as _zipfile
+
+    docs: list[Document] = []
+    skipped: list[str] = []  # 因超限被跳过的压缩包内部文件
+
+    def _store(name: str, content: bytes, ctype: str, note_text: str) -> Document:
+        stored_name = f"{secrets.token_hex(12)}{Path(name).suffix[:20]}" if Path(name).suffix else secrets.token_hex(16)
+        (settings.UPLOAD_DIR / stored_name).write_bytes(content)
+        doc = Document(
+            project_id=project_id,
+            uploader_id=user.id,
+            original_name=name[:255],
+            stored_name=stored_name,
+            size=len(content),
+            content_type=(ctype or "")[:120],
+            note=note_text[:200],
+        )
+        db.add(doc)
+        return doc
+
+    for original_name, content, ctype in uploads:
+        fname = original_name.strip() or "未命名文件"
+        ext = Path(fname).suffix.lower()
+        if ext in _ALLOWED_ARCHIVE_EXT and _zipfile.is_zipfile(io.BytesIO(content)):
+            # 大压缩包：包体上限独立于普通单文件限制（与 nginx 500m 对齐）
+            if len(content) > ZIP_MAX_ARCHIVE_BYTES:
+                raise ValidationError(f"压缩包 {fname} 超过 {ZIP_MAX_ARCHIVE_BYTES // (1024 * 1024)} MB 上限")
+            # 第一遍：只读元信息校验（数量/解压总量/路径安全），不驻留内容
+            total = 0
+            infos = []
+            try:
+                with _zipfile.ZipFile(io.BytesIO(content)) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir():
+                            continue
+                        inner_name = _zip_inner_name(info)
+                        if _zip_should_skip(inner_name):
+                            continue
+                        inner = Path(inner_name)
+                        if inner.is_absolute() or ".." in inner.parts:
+                            raise ValidationError(f"压缩包 {fname} 内含不安全路径（{inner_name}），已拒绝")
+                        target = (Path("unpacked") / inner).resolve()
+                        base = Path("unpacked").resolve()
+                        if not str(target).startswith(str(base)):
+                            raise ValidationError(f"压缩包 {fname} 内含不安全路径（{inner_name}），已拒绝")
+                        total += info.file_size
+                        if total > ZIP_MAX_TOTAL_BYTES:
+                            raise ValidationError(f"压缩包 {fname} 解压后超过 {ZIP_MAX_TOTAL_BYTES // (1024 * 1024)} MB，已拒绝")
+                        infos.append((info, inner_name))
+            except _zipfile.BadZipFile:
+                raise ValidationError(f"压缩包 {fname} 已损坏，请重新压缩后上传")
+            if len(infos) > ZIP_MAX_ENTRIES:
+                raise ValidationError(f"压缩包 {fname} 内文件数超过 {ZIP_MAX_ENTRIES}，已拒绝")
+            if not infos:
+                raise ValidationError(f"压缩包 {fname} 内没有文件")
+            # 第二遍：逐条解压入库（写盘后即释放，内存不驻留）
+            stem = Path(fname).stem
+            base_note = (note + "；" if note else "") + f"来自压缩包 {fname}"
+            with _zipfile.ZipFile(io.BytesIO(content)) as zf:
+                for info, inner_name in infos:
+                    if info.file_size > ZIP_MAX_INNER_BYTES:
+                        skipped.append(f"{fname}/{inner_name}（{info.file_size // (1024 * 1024)}MB 超过单文件 100MB）")
+                        continue
+                    docs.append(_store(f"{prefix}/{stem}/{inner_name}", zf.read(info), "", base_note))
+            if not docs:
+                raise ValidationError(f"压缩包 {fname} 内没有可入库的文件")
+        elif ext in {".rar", ".7z"}:
+            raise ValidationError("暂不支持 rar/7z，请将文件夹压缩为 zip 后重新上传")
+        else:
+            if len(content) > max_bytes:
+                raise ValidationError(f"文件 {fname} 超过大小限制（最大 {settings.MAX_UPLOAD_MB} MB）")
+            docs.append(_store(f"{prefix}/{fname}", content, ctype, note))
+    db.commit()
+    if skipped:
+        logger.warning("批量上传跳过超限文件 %d 个：%s", len(skipped), "、".join(skipped[:5]))
+    return docs
+
+
 def get_document_file(db: Session, document_id: int) -> Document:
     doc = db.get(Document, document_id)
     if doc is None:
@@ -676,6 +839,77 @@ def delete_document(db: Session, user: User, document_id: int) -> None:
         path.unlink(missing_ok=True)
     db.delete(doc)
     db.commit()
+
+
+# ---------- 管理员批量删除（按上传人/上传日期筛选；本地日期=UTC+8） ----------
+
+_TZ_OFFSET_HOURS = 8  # Asia/Shanghai，无夏令时
+
+
+def _bulk_filter_clause(user_id: int | None, local_date: str | None):
+    """组装批量删除/统计的过滤条件（验证日期格式，防注入）。"""
+    if local_date:
+        try:
+            dt.datetime.strptime(local_date, "%Y-%m-%d")
+        except ValueError:
+            raise ValidationError("日期格式应为 YYYY-MM-DD")
+    clauses = []
+    if user_id is not None:
+        clauses.append("d.uploader_id = :uid")
+    if local_date:
+        # uploaded_at 存 UTC naive；本地日期 = UTC + 8 小时
+        clauses.append(f"date(d.uploaded_at, '+{_TZ_OFFSET_HOURS} hours') = :ld")
+    if not clauses:
+        raise ValidationError("必须至少指定一个筛选条件（上传人或上传日期）")
+    return text(" AND ".join(clauses)), {"uid": user_id, "ld": local_date}
+
+
+def bulk_delete_documents(db: Session, admin: User, user_id: int | None, local_date: str | None) -> dict:
+    """管理员批量删除：按上传人和/或上传日期（本地）筛选。返回删除数量与释放空间。"""
+    clause, params = _bulk_filter_clause(user_id, local_date)
+    rows = db.execute(
+        text(f"SELECT d.id, d.stored_name, d.size FROM documents d WHERE {clause}"),
+        params,
+    ).fetchall()
+    if not rows:
+        raise NotFoundError("没有符合筛选条件的文档")
+    total_size = sum(r.size for r in rows)
+    removed = 0
+    for r in rows:
+        f = settings.UPLOAD_DIR / r.stored_name
+        if f.is_file():
+            f.unlink(missing_ok=True)
+        db.execute(text("DELETE FROM documents WHERE id=:i"), {"i": r.id})
+        removed += 1
+    target = db.get(User, user_id) if user_id else None
+    scope = f"上传人={target.display_name or target.username}({user_id})" if target else "全部上传人"
+    scope += f"，日期={local_date}" if local_date else ""
+    record_audit(
+        db, admin, "documents_bulk_delete",
+        object_type="document", object_name=scope,
+        detail=f"批量删除 {removed} 份文档（{total_size / 1024 / 1024:.1f} MB），筛选：{scope}",
+        ip="",
+    )
+    db.commit()
+    logger.info("批量删除文档：%d 份（%s），操作人 %s", removed, scope, admin.username)
+    return {"deleted": removed, "freed_mb": round(total_size / 1024 / 1024, 1)}
+
+
+def bulk_document_stats(db: Session, user_id: int | None, local_date: str | None) -> dict:
+    """批量删除前的预览统计：数量、总大小、样本清单。"""
+    clause, params = _bulk_filter_clause(user_id, local_date)
+    rows = db.execute(
+        text(f"SELECT d.id, d.original_name, d.size FROM documents d WHERE {clause} ORDER BY d.id DESC"),
+        params,
+    ).fetchall()
+    target = db.get(User, user_id) if user_id else None
+    return {
+        "count": len(rows),
+        "total_size": sum(r.size for r in rows),
+        "samples": [r.original_name for r in rows[:10]],
+        "user_name": (target.display_name or target.username) if target else "全部上传人",
+        "date": local_date or "不限",
+    }
 
 
 # ---------- 每日任务（周期清单，日期恒为当天；可分配多名成员） ----------
@@ -1161,6 +1395,21 @@ def generate_daily_report(db: Session, user: User, log_date: str) -> str:
             )
         ).all()
     )
+    # 阻塞原因：状态为 blocked 的任务取最近一次"转阻塞"的原因（转阻塞时必填）
+    blocked_reasons = {}
+    if logs:
+        blocked_task_ids = [t.id for _, t in logs if t.status == "blocked"]
+        if blocked_task_ids:
+            srows = db.execute(
+                select(TaskStatusLog)
+                .where(
+                    TaskStatusLog.task_id.in_(blocked_task_ids),
+                    TaskStatusLog.to_status == "blocked",
+                )
+                .order_by(TaskStatusLog.created_at.desc(), TaskStatusLog.id.desc())
+            ).scalars().all()
+            for s in srows:
+                blocked_reasons.setdefault(s.task_id, (s.reason or "").strip())
     for log, task in logs:
         label = f"{task.name} —— 进度 {log.progress}%"
         # 多行说明压平为单行（以；分隔），避免打断日志的行结构
@@ -1175,7 +1424,11 @@ def generate_daily_report(db: Session, user: User, log_date: str) -> str:
         else:
             doing.append(f"🔄 {label}")
             todo.append(f"{len(todo) + 1}. {task.name} —— 当前进度 {log.progress}%")
-            if overdue or any(k in note for k in ("阻塞", "卡", "等待", "协调")):
+            if task.status == "blocked":
+                # 任务真实处于阻塞状态：直接取转阻塞时填写的原因，不再依赖关键词猜测
+                reason = blocked_reasons.get(task.id) or note or "（未填写阻塞原因）"
+                blocked.append(f"⚠️ {task.name} —— 进度 {log.progress}%，阻塞原因：{reason}")
+            elif overdue or any(k in note for k in ("阻塞", "卡", "等待", "协调")):
                 blocked.append(f"⚠️ {label}")
 
     # 每日任务：当天勾选"今日完成"的自动计入工作日志（无需人工整理）；说明按人独立
@@ -1348,6 +1601,20 @@ def list_tasks_with_note(
     tasks = list_tasks(db, project_id)
     risks = compute_task_risks(db, tasks)
     pairs = _assignee_ids_by_task(db, project_id)
+    # 阻塞原因：blocked 任务取最近一次"转阻塞"的原因（供前端查看与修改）
+    blocked_ids = [t.id for t in tasks if t.status == "blocked"]
+    blocked_reasons: dict[int, str] = {}
+    if blocked_ids:
+        srows = db.execute(
+            select(TaskStatusLog)
+            .where(
+                TaskStatusLog.task_id.in_(blocked_ids),
+                TaskStatusLog.to_status == "blocked",
+            )
+            .order_by(TaskStatusLog.created_at.desc(), TaskStatusLog.id.desc())  # id 兜底：同刻多条取最新
+        ).scalars().all()
+        for s in srows:
+            blocked_reasons.setdefault(s.task_id, (s.reason or "").strip())
     return [
         {
             "id": t.id,
@@ -1361,6 +1628,7 @@ def list_tasks_with_note(
             "assignee_ids": pairs.get(t.id, []),
             "status": t.status or "not_started",
             "note": notes.get(t.id, ""),
+            "blocked_reason": blocked_reasons.get(t.id, "") if t.status == "blocked" else "",
             "risk_level": risks[t.id]["level"],
             "risk_reasons": risks[t.id]["reasons"],
             "position": t.position,
@@ -1894,3 +2162,260 @@ def list_audit_logs(
         "page": page,
         "page_size": page_size,
     }
+
+
+# ---------- 跨部门文档查询授权 ----------
+
+
+def doc_access_request(db: Session, user: User, department_id: int, expires_at: dt.datetime, note: str) -> dict:
+    """员工申请查询其他部门文档：生成待审批记录（管理员批准后才生效）。"""
+    dept = db.get(Department, department_id)
+    if dept is None:
+        raise NotFoundError("目标部门不存在")
+    my_ids = _user_dept_ids(db, user)
+    if department_id in my_ids:
+        raise ValidationError("您已属于该部门，无需申请跨部门查询权限")
+    if expires_at <= dt.datetime.now():
+        raise ValidationError("有效期截止时间必须晚于当前时间")
+    if expires_at > dt.datetime.now() + dt.timedelta(days=365):
+        raise ValidationError("单次授权最长 365 天")
+    # 已有生效中的同部门授权 → 拒绝重复申请
+    dup = db.execute(
+        select(DocAccessGrant).where(
+            DocAccessGrant.user_id == user.id,
+            DocAccessGrant.department_id == department_id,
+            DocAccessGrant.status == "approved",
+            DocAccessGrant.expires_at > dt.datetime.now(),
+        )
+    ).scalar_one_or_none()
+    if dup is not None:
+        raise ValidationError(f"您已拥有该部门的查询授权（至 {dup.expires_at:%Y-%m-%d %H:%M}），无需重复申请")
+    grant = DocAccessGrant(
+        user_id=user.id,
+        department_id=department_id,
+        status="pending",
+        expires_at=expires_at,
+        note=note[:200],
+    )
+    db.add(grant)
+    db.commit()
+    record_audit(
+        db, user, "doc_access_request",
+        object_type="doc_access", object_id=grant.id, object_name=dept.name,
+        detail=f"申请跨部门文档查询权限（期望有效期至 {expires_at:%Y-%m-%d %H:%M}）",
+    )
+    return _doc_access_out(db, grant)
+
+
+def _doc_access_out(db: Session, g: DocAccessGrant) -> dict:
+    user = db.get(User, g.user_id)
+    dept = db.get(Department, g.department_id)
+    now = dt.datetime.now()
+    return {
+        "id": g.id,
+        "user_id": g.user_id,
+        "user_name": (user.display_name or user.username) if user else f"用户#{g.user_id}",
+        "username": user.username if user else "",
+        "department_id": g.department_id,
+        "department_name": dept.name if dept else "",
+        "status": g.status,
+        "status_label": {"pending": "待审批", "approved": "生效中", "revoked": "已撤销"}.get(g.status, g.status),
+        "expired": g.expires_at <= now,
+        "expires_at": g.expires_at.isoformat(timespec="seconds"),
+        "note": g.note,
+        "created_at": g.created_at.isoformat(timespec="seconds"),
+    }
+
+
+def my_doc_access(db: Session, user: User) -> list[dict]:
+    """我的跨部门查询授权与申请记录（含已过期标记）。"""
+    rows = db.execute(
+        select(DocAccessGrant).where(DocAccessGrant.user_id == user.id).order_by(DocAccessGrant.id.desc())
+    ).scalars().all()
+    return [_doc_access_out(db, g) for g in rows]
+
+
+def list_doc_access(db: Session, status: str | None = None) -> list[dict]:
+    stmt = select(DocAccessGrant).order_by(DocAccessGrant.id.desc())
+    if status:
+        stmt = stmt.where(DocAccessGrant.status == status)
+    rows = db.execute(stmt).scalars().all()
+    return [_doc_access_out(db, g) for g in rows]
+
+
+def decide_doc_access(db: Session, admin: User, grant_id: int, action: str, expires_at: dt.datetime | None = None) -> dict:
+    """管理员审批：approve（可设定/调整有效期）或 revoke（即时失效）。"""
+    g = db.get(DocAccessGrant, grant_id)
+    if g is None:
+        raise NotFoundError("授权记录不存在")
+    dept = db.get(Department, g.department_id)
+    dept_name = dept.name if dept else ""
+    if action == "approve":
+        if expires_at is not None:
+            if expires_at <= dt.datetime.now():
+                raise ValidationError("有效期截止时间必须晚于当前时间")
+            g.expires_at = expires_at
+        g.status = "approved"
+        g.decided_at = dt.datetime.now()
+        g.granted_by = admin.id
+        detail = f"批准跨部门文档查询（{dept_name}，有效期至 {g.expires_at:%Y-%m-%d %H:%M}）"
+    elif action == "revoke":
+        g.status = "revoked"
+        g.decided_at = dt.datetime.now()
+        g.granted_by = admin.id
+        detail = f"撤销跨部门文档查询授权（{dept_name}）"
+    else:
+        raise ValidationError("未知操作")
+    db.commit()
+    record_audit(
+        db, admin, f"doc_access_{action}",
+        object_type="doc_access", object_id=g.id, object_name=dept_name,
+        detail=detail, ip="",
+    )
+    return _doc_access_out(db, g)
+
+
+def grant_doc_access(db: Session, admin: User, user_id: int, department_id: int, expires_at: dt.datetime) -> dict:
+    """管理员直接为员工授权（跳过申请流程）。"""
+    target = db.get(User, user_id)
+    if target is None or not target.is_active:
+        raise NotFoundError("员工不存在或已停用")
+    dept = db.get(Department, department_id)
+    if dept is None:
+        raise NotFoundError("目标部门不存在")
+    if expires_at <= dt.datetime.now():
+        raise ValidationError("有效期截止时间必须晚于当前时间")
+    if expires_at > dt.datetime.now() + dt.timedelta(days=365):
+        raise ValidationError("单次授权最长 365 天")
+    grant = DocAccessGrant(
+        user_id=user_id,
+        department_id=department_id,
+        status="approved",
+        expires_at=expires_at,
+        note="管理员直接授权",
+        granted_by=admin.id,
+        decided_at=dt.datetime.now(),
+    )
+    db.add(grant)
+    db.commit()
+    record_audit(
+        db, admin, "doc_access_grant",
+        object_type="doc_access", object_id=grant.id, object_name=dept.name,
+        detail=f"为 {target.display_name or target.username} 直接授权跨部门文档查询（有效期至 {expires_at:%Y-%m-%d %H:%M}）",
+        ip="",
+    )
+    return _doc_access_out(db, grant)
+
+
+# ---------- 工作周报（按周聚合每日日报，固定四段式） ----------
+
+_WEEKDAY_CN = "一二三四五六日"
+
+
+def _split_daily_sections(md: str) -> dict[str, list[str]]:
+    """把每日日报（六段式纯文本）切分为 一~六 段的行列表。"""
+    sections: dict[str, list[str]] = {}
+    current = None
+    for line in md.splitlines():
+        m = re.match(r"^([一二三四五六])、", line.strip())
+        if m:
+            current = m.group(1)
+            sections[current] = []
+            continue
+        if (
+            current
+            and line.strip()
+            and not line.startswith("────")
+            and not line.startswith("💡")
+            and not line.startswith("工作日志 ·")
+            and not line.startswith("（由 OpenGantt")
+        ):
+            sections[current].append(line.rstrip())
+    return sections
+
+
+def generate_weekly_report(db: Session, user: User, any_date: str) -> str:
+    """按 any_date 所在周（周一~周日，截至今天）聚合每日日报，生成固定格式周报。
+
+    数据结构：不新建表/列——完全复用每日进度快照（ProgressLog/TaskNote/DailyTask 等），
+    逐日调用 generate_daily_report 后按段落聚合。
+    """
+    base = dt.date.fromisoformat(any_date)
+    monday = base - dt.timedelta(days=base.weekday())
+    days = [(monday + dt.timedelta(days=i)).isoformat() for i in range(7)]
+    today = _today_str()
+    days = [x for x in days if x <= today]  # 周报只覆盖到今天为止
+    if not days:
+        raise ValidationError("所选周尚无任何日期数据")
+
+    day_sections: list[tuple[str, dt.date]] = []
+    overview: list[str] = []
+    problems: list[str] = []
+    plans: list[str] = []
+    log_days = 0
+    for day in days:
+        md = generate_daily_report(db, user, day)
+        sec = _split_daily_sections(md)
+        has_content = bool(
+            [x for x in sec.get("一", []) if not x.startswith("（")]
+        ) or bool([x for x in sec.get("二", []) if not x.startswith("（")])
+        if has_content:
+            log_days += 1
+        day_sections.append((day, sec))
+        for line in sec.get("一", []):
+            if not line.startswith("（") and line not in overview:
+                overview.append(line)
+        blocked_lines = sec.get("三", [])
+        if blocked_lines and not blocked_lines[0].startswith("（无"):
+            problems.append(f"【{day}】")
+            problems.extend(f"  {x}" for x in blocked_lines)
+        for line in sec.get("六", []):
+            cleaned = re.sub(r"^\d+\.\s*", "", line).strip()
+            if cleaned and not cleaned.startswith("（无") and cleaned not in plans:
+                plans.append(cleaned)
+
+    # 一、本周工作概览：完成项合并 + 概况统计
+    first, last = days[0], days[-1]
+    weekday_cn = _WEEKDAY_CN[base.weekday()]
+    dept = "、".join(_user_dept_names(db, user))
+    divider = "──────────────────────────────"
+    lines = [
+        f"工作周报 · {first} ~ {last}",
+        divider,
+        f"{user.display_name or user.username}（{ROLE_LABELS.get(user.role, '')}{(' · ' + dept) if dept else ''}）· 每日任务进度",
+        "（由 OpenGantt 依据本周期内每日工作日志自动汇总生成）",
+        "",
+        "一、本周工作概览",
+        f"· 本周提交工作日志 {log_days} 天（共 {len(days)} 个工作日）",
+        f"· 完成任务/事项 {len(overview)} 项",
+        *(f"· {x}" for x in overview[:12]),
+        *(["· ……其余完成项见每日明细"] if len(overview) > 12 else []),
+        "",
+        "二、每日工作明细（日期、工作内容、完成情况）",
+    ]
+    for day, sec in day_sections:
+        d_obj = dt.date.fromisoformat(day)
+        lines.append(f"【{day}（星期{_WEEKDAY_CN[d_obj.weekday()]}）】")
+        day_lines = sec.get("一", []) + sec.get("二", [])
+        body = [x for x in day_lines if x.strip()]
+        if body:
+            lines.extend(f"  {x}" for x in body)
+        else:
+            lines.append("  （当日无任务进度记录）")
+        lines.append("")
+    lines += ["三、遇到的问题及解决方案"]
+    if problems:
+        lines.extend(f"· {x}" for x in problems)
+        lines.append("  （解决方案见各阻塞原因描述；已解决的任务已计入完成项）")
+    else:
+        lines.append("· 本周无阻塞或待协调事项")
+    plans_lines = [f"{i + 1}. {x}" for i, x in enumerate(plans[:15])] if plans else ["（本周未记录次日待办）"]
+    lines += [
+        "",
+        "四、下周工作计划（按本周最后记录的次日待办合并）",
+        *plans_lines,
+        "",
+        divider,
+        f"💡 OpenGantt 自动生成于 {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+    ]
+    return "\n".join(lines)

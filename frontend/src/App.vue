@@ -180,21 +180,80 @@
 
       <div class="og-panel-title">项目进度文档
         <small>按「部门 → 成员 → 文档」三级浏览，点击行展开/收起；上传时文档归属于所选项目</small>
+        <span class="doc-date-filter">
+          📅 按上传日期筛选
+          <input type="date" v-model="docDateFilter" title="只显示该日期上传的文档" />
+          <button v-if="docDateFilter" class="mini" @click="docDateFilter = ''">清除筛选</button>
+          <small v-if="docDateFilter" class="muted">
+            筛选结果：{{ docFilterCount }} 份（部门 {{ filteredDocTree.length }} 个）
+          </small>
+        </span>
+        <button class="mini" style="margin-left: 12px" @click="openDocAccess">🔐 跨部门查询权限</button>
       </div>
 
+      <!-- 跨部门查询权限：我的授权与申请 -->
+      <section v-if="showDocAccess" class="panel" style="border: 1px solid var(--border); border-radius: 10px; padding: 12px">
+        <div class="report-controls" v-if="docAccessRows.some((r) => r.status === 'approved' && !r.expired)">
+          <p class="report-hint" style="margin: 0">
+            🔓 已生效授权：<b>{{ docAccessRows.filter((r) => r.status === "approved" && !r.expired).map((r) => r.department_name + "（至 " + r.expires_at.slice(0, 16).replace("T", " ") + "）").join("、") }}</b>
+          </p>
+        </div>
+        <div class="report-controls">
+          <select v-model.number="daReqDept">
+            <option :value="null" disabled>申请查询哪个部门的文档…</option>
+            <option v-for="d in departments" :key="d.id" :value="d.id">{{ d.name }}</option>
+          </select>
+          <label>期望有效期至 <input type="datetime-local" v-model="daReqUntil" /></label>
+          <input v-model="daReqNote" placeholder="申请说明（选填，如：项目对接需要）" maxlength="200" />
+          <button class="primary" :disabled="daReqBusy || !daReqDept || !daReqUntil" @click="submitDocAccess">
+            {{ daReqBusy ? "提交中…" : "提交申请" }}
+          </button>
+        </div>
+        <table class="data-table" v-if="docAccessRows.length">
+          <thead><tr><th>目标部门</th><th>状态</th><th>有效期至</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr v-for="g in docAccessRows" :key="g.id">
+              <td>{{ g.department_name }}</td>
+              <td>{{ g.status === "approved" && g.expired ? "已过期" : g.status_label }}</td>
+              <td class="mono">{{ g.expires_at }}</td>
+              <td>{{ g.note || "—" }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="report-hint" v-else>尚无申请记录。提交后由管理员审批，批准且在有效期内即可在下方浏览该部门的文档。</p>
+      </section>
+
       <section class="panel doc-upload">
-        <select v-model.number="docUpload.project_id">
+        <select v-model.number="docUpload.project_id" title="上传到哪个项目（文档归属该项目）">
+          <option :value="null" disabled>请选择项目…</option>
           <option v-for="p in editableProjects" :key="p.id" :value="p.id">{{ p.name }}</option>
         </select>
-        <input ref="docFileRef" type="file" />
+        <input ref="docFileRef" type="file" multiple title="可多选文件；zip 压缩包将自动解压为独立文档" @change="docFilesPicked" />
+        <input
+          ref="docFolderRef"
+          type="file"
+          webkitdirectory
+          title="选择整个文件夹（保留内部目录结构）"
+          @change="docFilesPicked"
+          style="display: none"
+        />
+        <button class="mini" @click="docFolderRef?.click()">📁 选择文件夹</button>
         <input v-model="docUpload.note" placeholder="备注（选填）" maxlength="200" />
-        <button class="primary" :disabled="docBusy || !docUpload.project_id" @click="uploadDoc">
-          {{ docBusy ? "上传中…" : "⬆ 上传到所选项目" }}
+        <button class="primary" :disabled="docBusy || !docUpload.project_id || !docFiles.length" @click="uploadDoc">
+          {{ docBusy ? `⬆ 上传中 ${docProgress}%` : `⬆ 上传${docFiles.length > 1 ? `（${docFiles.length} 个文件）` : ""}` }}
         </button>
+        <small v-if="docFiles.length" class="muted">已选 {{ docFiles.length }} 个文件；单次 ≤200 个、单文件 ≤20MB</small>
+        <p v-if="!editableProjects.length" class="modal-tip">
+          您还没有可上传文档的项目——需为项目负责人或项目所在部门成员；请联系管理员或先创建项目。
+        </p>
+        <div v-if="docBusy" class="upload-progress" aria-live="polite">
+          <div class="upload-progress-bar" :style="{ width: docProgress + '%' }"></div>
+          <span class="upload-progress-text">上传中 {{ docProgress }}%（{{ docProgressLabel }}）</span>
+        </div>
       </section>
 
       <section class="doc-tree">
-        <div v-for="d in docTree" :key="d.department_id" class="dt-dept">
+        <div v-for="d in filteredDocTree" :key="d.department_id" class="dt-dept">
           <div class="dt-row dt-l1" @click="toggleTree('d' + d.department_id)">
             <span class="dt-arrow">{{ expandedTree["d" + d.department_id] ? "▼" : "▶" }}</span>
             🏢 <b>{{ d.department_name }}</b>
@@ -218,6 +277,9 @@
             </div>
           </div>
         </div>
+        <p v-if="docDateFilter && !filteredDocTree.length" class="state">
+          该日期没有找到文档——请更换日期或点击「清除筛选」查看全部。
+        </p>
         <p v-if="!docTree.length" class="state">暂无文档，先在上方选择项目并上传。</p>
       </section>
     </template>
@@ -349,11 +411,40 @@
             <option value="medium">🟡 中</option>
             <option value="low">⚪ 低</option>
           </select>
-          <small>{{ currentProject.department_name }} · 负责人：{{ currentProject.owner_name || "—" }}
+          <small>{{ currentProject.department_name }} · 负责人：<button
+              v-if="currentUser.role === 'admin'"
+              type="button"
+              class="owner-edit-link"
+              title="点击修改项目负责人"
+              @click="openOwnerModal"
+            >{{ currentProject.owner_name || "—" }} ✎</button>
+            <template v-else>{{ currentProject.owner_name || "—" }}</template>
             <b v-if="!currentProject.can_edit" class="readonly-tag">
               （您对项目仅可查看；作为任务负责人仍可编辑自己的任务）
             </b>
           </small>
+        </div>
+
+        <!-- 修改项目负责人（管理员，点项目信息里的名字弹出） -->
+        <div v-if="showOwnerModal" class="modal-mask" @click.self="showOwnerModal = false">
+          <div class="modal">
+            <h2>👤 修改项目负责人</h2>
+            <p class="modal-tip">项目「{{ currentProject?.name }}」当前负责人：{{ currentProject?.owner_name || "—" }}</p>
+            <label>
+              新负责人
+              <select v-model.number="ownerDraft">
+                <option v-for="u in adminUsers" :key="u.id" :value="u.id">
+                  {{ u.display_name }}（{{ u.username }}）
+                </option>
+              </select>
+            </label>
+            <footer>
+              <button @click="showOwnerModal = false">取消</button>
+              <button class="primary" :disabled="ownerSaving || !ownerDraft" @click="saveOwnerModal">
+                {{ ownerSaving ? "保存中…" : "确认修改" }}
+              </button>
+            </footer>
+          </div>
         </div>
 
         <!-- 任务清单：可展开子项（交互样式与"项目进度文档"一致） -->
@@ -555,17 +646,57 @@
             </select>
           </label>
           <div class="field">
-            <span class="field-label">负责人（可多选）</span>
-            <div class="dep-list assignee-list">
-              <label v-for="u in selectableUsers" :key="u.id" class="dep-item">
-                <input
-                  type="checkbox"
-                  :checked="newTask.assignee_ids.includes(u.id)"
-                  @change="toggleNewAssignee(u.id, $event.target.checked)"
-                />
-                <span class="dep-name">{{ u.display_name }}</span>
-              </label>
-              <p v-if="!users.length" class="modal-tip">暂无可选账号</p>
+            <span class="field-label">负责人（可多选，按部门选择）</span>
+            <template v-if="assigneeDeptId === null">
+              <div class="dep-list assignee-list">
+                <button type="button" class="dep-item dept-entry" @click="assigneeDeptId = -1">
+                  <span class="dep-name">👥 全部人员</span>
+                  <span class="dept-count">{{ selectableUsers.length }} 人</span>
+                  <span class="dt-arrow">▶</span>
+                </button>
+                <button
+                  v-for="g in assigneeDeptGroups"
+                  :key="g.deptId"
+                  type="button"
+                  class="dep-item dept-entry"
+                  @click="assigneeDeptId = g.deptId"
+                >
+                  <span class="dep-name">🏢 {{ g.deptName }}</span>
+                  <span class="dept-count">{{ g.users.length }} 人</span>
+                  <span v-if="g.checkedCount" class="dept-checked">已选 {{ g.checkedCount }}</span>
+                  <span class="dt-arrow">▶</span>
+                </button>
+                <p v-if="!assigneeDeptGroups.length" class="modal-tip">暂无可选账号</p>
+              </div>
+            </template>
+            <template v-else>
+              <div class="assignee-nav">
+                <button type="button" class="mini" @click="assigneeDeptId = null">← 返回部门列表</button>
+                <span class="muted">{{ currentAssigneeDeptName }}（{{ currentAssigneeUsers.length }} 人）</span>
+              </div>
+              <div class="dep-list assignee-list">
+                <label v-for="u in currentAssigneeUsers" :key="u.id" class="dep-item">
+                  <input
+                    type="checkbox"
+                    :checked="newTask.assignee_ids.includes(u.id)"
+                    @change="toggleNewAssignee(u.id, $event.target.checked)"
+                  />
+                  <span class="dep-name">{{ u.display_name }}</span>
+                </label>
+              </div>
+            </template>
+            <div v-if="newTask.assignee_ids.length" class="assignee-actions">
+              <span class="field-label">已选负责人：</span>
+              <button
+                v-for="uid in newTask.assignee_ids"
+                :key="uid"
+                type="button"
+                class="assignee-chip"
+                :title="'点击移除 ' + newTaskAssigneeName(uid)"
+                @click="removeNewAssignee(uid)"
+              >
+                {{ newTaskAssigneeName(uid) }} ✕
+              </button>
             </div>
           </div>
         </div>
@@ -594,10 +725,17 @@
     <!-- 我的工作日志 -->
     <div v-if="showReport" class="modal-mask" @click.self="showReport = false">
       <div class="modal report-modal">
-        <h2>📋 我的工作日志 <small>{{ reportDate }}</small></h2>
+        <h2>
+          {{ reportMode === "weekly" ? "📅 我的工作周报" : "📋 我的工作日志" }}
+          <small>{{ reportMode === "weekly" ? weeklyRangeLabel : reportDate }}</small>
+        </h2>
+        <div class="report-tabs">
+          <button :class="{ primary: reportMode === 'daily' }" @click="switchReportMode('daily')">日报</button>
+          <button :class="{ primary: reportMode === 'weekly' }" @click="switchReportMode('weekly')">周报</button>
+        </div>
         <pre v-if="reportText" class="report-pre">{{ reportText }}</pre>
         <p v-else class="modal-tip">{{ reportLoading ? "生成中…" : "暂无内容" }}</p>
-        <div v-if="isToday" class="decisions-box">
+        <div v-if="isToday && reportMode === 'daily'" class="decisions-box">
           <span class="field-label">四、关键决策（当日可填写，保存后自动进入日志）</span>
           <textarea
             v-model="decisionsText"
@@ -611,7 +749,7 @@
             </button>
           </div>
         </div>
-        <div v-if="isToday" class="decisions-box">
+        <div v-if="isToday && reportMode === 'daily'" class="decisions-box">
           <span class="field-label">五、补充事项（临时事项，每行一条，保存后自动进入日志）</span>
           <textarea
             v-model="extrasText"
@@ -710,6 +848,35 @@ async function openReport() {
   } catch (e) {
     fail(e);
     showReport.value = false;
+  } finally {
+    reportLoading.value = false;
+  }
+}
+
+/** 日报/周报切换 */
+const reportMode = ref("daily");
+const weeklyRangeLabel = computed(() => {
+  const d = new Date(reportDate + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return reportDate;
+  const monday = new Date(d);
+  monday.setDate(d.getDate() - d.getDay() + (d.getDay() === 0 ? -6 : 1));
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  const pad = (n) => String(n).padStart(2, "0");
+  const fmt = (x) => `${x.getFullYear()}-${pad(x.getMonth() + 1)}-${pad(x.getDate())}`;
+  return `${fmt(monday)} ~ ${fmt(sunday)}`;
+});
+
+async function switchReportMode(mode) {
+  if (reportMode.value === mode) return;
+  reportMode.value = mode;
+  reportLoading.value = true;
+  reportText.value = "";
+  try {
+    reportText.value =
+      mode === "weekly" ? await api.weeklyReport(reportDate) : await api.dailyReport(reportDate);
+  } catch (e) {
+    fail(e);
   } finally {
     reportLoading.value = false;
   }
@@ -1049,6 +1216,37 @@ async function createProject() {
   }
 }
 
+/** 管理员修改项目负责人：点项目信息里的负责人名字 → 弹窗选择 → 保存 */
+const showOwnerModal = ref(false);
+const ownerDraft = ref(null);
+const ownerSaving = ref(false);
+
+function openOwnerModal() {
+  ownerDraft.value = currentProject.value?.owner_id ?? null;
+  showOwnerModal.value = true;
+}
+
+async function saveOwnerModal() {
+  const p = currentProject.value;
+  if (!p || !ownerDraft.value) return;
+  const u = adminUsers.value.find((x) => x.id === ownerDraft.value);
+  if (u && u.id === p.owner_id) {
+    toastRef.value?.showError("新负责人与当前负责人相同");
+    return;
+  }
+  ownerSaving.value = true;
+  try {
+    await api.updateProject(p.id, { owner_id: Number(ownerDraft.value) });
+    toastRef.value?.showInfo(`项目负责人已改为「${u?.display_name || ownerDraft.value}」`);
+    showOwnerModal.value = false;
+    projects.value = await api.listProjects();
+  } catch (e) {
+    fail(e);
+  } finally {
+    ownerSaving.value = false;
+  }
+}
+
 async function removeProject() {
   const project = projects.value.find((p) => p.id === currentProjectId.value);
   if (!project) return;
@@ -1076,6 +1274,42 @@ function toggleNewAssignee(id, checked) {
   if (checked && !has) newTask.assignee_ids.push(id);
   if (!checked && has) newTask.assignee_ids = newTask.assignee_ids.filter((x) => x !== id);
 }
+
+/** 负责人两级选择：先部门后人员；跨部门已选人员始终在"已选负责人"区回显可移除 */
+const assigneeDeptId = ref(null); // null=部门列表层；-1=全部人员；>0=具体部门
+const assigneeDeptGroups = computed(() => {
+  const groups = new Map();
+  for (const u of selectableUsers.value) {
+    const key = u.department_id ?? 0;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(u);
+  }
+  return [...groups.entries()].map(([deptId, us]) => ({
+    deptId,
+    deptName: departments.value.find((d) => d.id === deptId)?.name || "未分部门",
+    users: us,
+    checkedCount: us.filter((u) => newTask.assignee_ids.includes(u.id)).length,
+  }));
+});
+const currentAssigneeDeptName = computed(() => {
+  if (assigneeDeptId.value === -1) return "全部人员";
+  return (
+    assigneeDeptGroups.value.find((g) => g.deptId === assigneeDeptId.value)?.deptName || ""
+  );
+});
+const currentAssigneeUsers = computed(() => {
+  if (assigneeDeptId.value === -1) return selectableUsers.value;
+  return assigneeDeptGroups.value.find((g) => g.deptId === assigneeDeptId.value)?.users || [];
+});
+function newTaskAssigneeName(uid) {
+  return users.value.find((u) => u.id === uid)?.display_name || `用户#${uid}`;
+}
+function removeNewAssignee(uid) {
+  newTask.assignee_ids = newTask.assignee_ids.filter((x) => x !== uid);
+}
+watch(showNewTask, (open) => {
+  if (open) assigneeDeptId.value = null; // 每次打开回到部门列表层
+});
 
 async function createTask() {
   try {
@@ -1268,7 +1502,6 @@ async function submitChangePw() {
 
 // ---------- 工作状态（自助设置；简报统计仅计在岗；支持预计结束时间自动恢复） ----------
 const wsUntilDraft = ref("");
-
 function fmtWsUntil(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -1302,9 +1535,90 @@ const expandedTree = reactive({});
 const docUpload = reactive({ project_id: null, note: "" });
 const docBusy = ref(false);
 const docFileRef = ref(null);
+const docFolderRef = ref(null);
+const docFiles = ref([]); // 支持多选与整个文件夹（webkikitDirectory 的 File 列表）
+const docProgress = ref(0);
+const docProgressLabel = ref("准备上传");
 const prevView = ref("home");
 
 const editableProjects = computed(() => projects.value.filter((p) => p.can_edit));
+
+// ---------- 按上传日期筛选文档树（本地时区日期匹配；后端零改动） ----------
+const docDateFilter = ref(""); // "" = 显示全部
+
+function docLocalDate(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+const filteredDocTree = computed(() => {
+  if (!docDateFilter.value) return docTree.value;
+  return docTree.value
+    .map((dept) => {
+      const members = dept.members
+        .map((m) => ({
+          ...m,
+          documents: (m.documents || []).filter((d) => docLocalDate(d.uploaded_at) === docDateFilter.value),
+        }))
+        .filter((m) => m.documents.length);
+      return { ...dept, members };
+    })
+    .filter((dept) => dept.members.length);
+});
+
+const docFilterCount = computed(() =>
+  filteredDocTree.value.reduce((s, d) => s + d.members.reduce((x, m) => x + m.documents.length, 0), 0)
+);
+
+// 进入文档中心（或项目权限变化）时自动选中第一个可编辑项目——
+// 否则 select 显示了项目名但 v-model 仍为 null，上传按钮会一直禁用（点击无反应）
+watch(
+  [() => view.value, editableProjects],
+  () => {
+    if (view.value !== "docs") return;
+    if (
+      !docUpload.project_id ||
+      !editableProjects.value.some((p) => p.id === docUpload.project_id)
+    ) {
+      docUpload.project_id = editableProjects.value[0]?.id ?? null;
+    }
+  },
+  { immediate: true }
+);
+
+function docFilesPicked() {
+  const fromPicker = [...(docFileRef.value?.files || []), ...(docFolderRef.value?.files || [])];
+  if (!fromPicker.length) return;
+  // 上传前预校验：数量/大小/压缩包格式，选完立即提示，避免上传后才发现不符合条件
+  const issues = [];
+  let oversized = 0;
+  let badArchive = 0;
+  let hugeZip = 0;
+  for (const f of fromPicker) {
+    const rel = f.webkitRelativePath || f.name;
+    if (/\.rar$|\.7z$/i.test(rel)) badArchive++;
+    else if (/\.zip$/i.test(rel)) {
+      if (f.size > 500 * 1024 * 1024) hugeZip++;
+    } else if (f.size > 20 * 1024 * 1024) oversized++;
+  }
+  if (fromPicker.length > 200) {
+    issues.push(`已选 ${fromPicker.length} 个文件，超过单次上限 200 个——请分批上传，或将文件夹压缩为 zip（自动解压，包内最多 1000 个文件）`);
+  }
+  if (badArchive) issues.push(`包含 ${badArchive} 个 rar/7z 压缩包（不支持），请转为 zip`);
+  if (hugeZip) issues.push(`包含 ${hugeZip} 个超过 500MB 的 zip 包（zip 上限 500MB）`);
+  if (oversized) issues.push(`包含 ${oversized} 个超过 20MB 的普通文件（单文件上限 20MB；请压缩为 zip，包内单文件上限 100MB）`);
+  if (issues.length) toastRef.value?.showError(issues.join("；"));
+  // 文件夹上传时保留相对路径（webkitRelativePath），服务端按路径归档
+  docFiles.value = fromPicker.slice(0, 200);
+  if (docFiles.value.length) {
+    const totalMB = (docFiles.value.reduce((s, f) => s + f.size, 0) / 1024 / 1024).toFixed(1);
+    const first = docFiles.value[0];
+    const label = docFiles.value.length > 1 ? `${first.webkitRelativePath || first.name} 等` : (first.webkitRelativePath || first.name);
+    toastRef.value?.showInfo(`已选择 ${docFiles.value.length} 个文件（共 ${totalMB} MB）：${label}——请确认项目与备注后点击"上传"`);
+  }
+}
 
 function toggleDocsView() {
   if (view.value === "docs") {
@@ -1324,6 +1638,77 @@ async function loadDocTree() {
   }
 }
 
+async function uploadDoc() {
+  if (!docFiles.value.length || !docUpload.project_id) return;
+  docBusy.value = true;
+  docProgress.value = 0;
+  docProgressLabel.value = "准备上传";
+  try {
+    const first = docFiles.value[0];
+    const totalMB = (docFiles.value.reduce((s, f) => s + f.size, 0) / 1024 / 1024).toFixed(1);
+    const r = await api.uploadDocumentsBulk(
+      docUpload.project_id,
+      docFiles.value,
+      docUpload.note.trim(),
+      (pct) => {
+        docProgress.value = pct;
+        docProgressLabel.value = `共 ${totalMB} MB`;
+      }
+    );
+    const hint = r.count > 1 ? `（含压缩包解压共 ${r.count} 个文件）` : "";
+    toastRef.value?.showInfo(`✅ 上传成功：「${first.webkitRelativePath || first.name}」${hint}`);
+    docUpload.note = "";
+    docFiles.value = [];
+    if (docFileRef.value) docFileRef.value.value = "";
+    if (docFolderRef.value) docFolderRef.value.value = "";
+    await loadDocTree();
+  } catch (e) {
+    toastRef.value?.showError(`❌ 上传失败：${e?.message || "未知错误"}`);
+    fail(e);
+  } finally {
+    docBusy.value = false;
+    docProgress.value = 0;
+  }
+}
+
+// ---------- 跨部门文档查询权限（员工自助申请 + 我的授权） ----------
+const showDocAccess = ref(false);
+const docAccessRows = ref([]);
+const daReqDept = ref(null);
+const daReqUntil = ref("");
+const daReqNote = ref("");
+const daReqBusy = ref(false);
+
+function openDocAccess() {
+  showDocAccess.value = !showDocAccess.value;
+  if (showDocAccess.value) loadDocAccess();
+}
+
+async function loadDocAccess() {
+  try {
+    docAccessRows.value = await api.myDocAccess();
+  } catch (e) {
+    fail(e);
+  }
+}
+
+async function submitDocAccess() {
+  daReqBusy.value = true;
+  try {
+    await api.requestDocAccess(daReqDept.value, daReqUntil.value, daReqNote.value);
+    const dept = departments.value.find((d) => d.id === daReqDept.value);
+    toastRef.value?.showInfo(`已提交申请：查询「${dept?.name || "目标部门"}」文档，等待管理员审批`);
+    daReqDept.value = null;
+    daReqUntil.value = "";
+    daReqNote.value = "";
+    await loadDocAccess();
+  } catch (e) {
+    fail(e);
+  } finally {
+    daReqBusy.value = false;
+  }
+}
+
 function toggleTree(key) {
   expandedTree[key] = !expandedTree[key];
 }
@@ -1337,23 +1722,6 @@ function fmtSize(bytes) {
 
 function fmtDate(iso) {
   return new Date(iso).toLocaleString("zh-CN", { hour12: false });
-}
-
-async function uploadDoc() {
-  const file = docFileRef.value?.files?.[0];
-  if (!file || !docUpload.project_id) return;
-  docBusy.value = true;
-  try {
-    await api.uploadDocument(docUpload.project_id, file, docUpload.note.trim());
-    toastRef.value?.showError(`「${file.name}」已上传`);
-    docUpload.note = "";
-    if (docFileRef.value) docFileRef.value.value = "";
-    await loadDocTree();
-  } catch (e) {
-    fail(e);
-  } finally {
-    docBusy.value = false;
-  }
 }
 
 async function removeDoc(doc) {
@@ -1437,7 +1805,7 @@ async function bootstrapData() {
   if (currentUser.value.role === "admin") {
     adminUsers.value = await api.admin.listUsers();
     if (departments.value.length) newProject.department_id = departments.value[0].id;
-    if (adminUsers.value.length) newProject.owner_id = adminUsers.value[0].id;
+    if (adminUsers.value.length) newProject.owner_id = currentUser.value.id;
   }
   // 部门页默认选中该部门第一个项目；全局搜索跳转时优先选中目标项目
   if (view.value === "dept") {
@@ -2015,6 +2383,124 @@ onBeforeUnmount(() => {
   font-size: 12px;
   padding: 2px 4px;
   margin-left: 6px;
+}
+
+/* 负责人两级选择 */
+.dept-entry {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 13px;
+}
+
+.dept-entry:hover {
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 6px;
+}
+
+.dept-entry .dep-name {
+  flex: 1;
+}
+
+.dept-count {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dept-checked {
+  color: #597ef7;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.assignee-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.assignee-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  font-size: 12px;
+  padding: 2px 10px;
+  margin: 0 4px 4px 0;
+  cursor: pointer;
+}
+
+.assignee-chip:hover {
+  border-color: #f5222d;
+  color: #f5222d;
+}
+
+/* 文档中心日期筛选 */
+.doc-date-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  font-size: 12px;
+}
+
+.doc-date-filter input[type="date"] {
+  font-size: 12px;
+  padding: 2px 4px;
+}
+
+/* 项目信息里的可点击负责人（管理员改负责人入口） */
+.owner-edit-link {
+  background: none;
+  border: none;
+  border-bottom: 1px dashed var(--muted);
+  padding: 0;
+  font-size: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.owner-edit-link:hover {
+  color: #597ef7;
+  border-bottom-color: #597ef7;
+}
+
+/* 上传进度条（文档中心） */
+.upload-progress {
+  position: relative;
+  width: 100%;
+  height: 18px;
+  margin-top: 6px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+
+.upload-progress-bar {
+  height: 100%;
+  border-radius: 9px;
+  background: linear-gradient(90deg, #36cfc9, #597ef7);
+  transition: width 0.2s ease;
+}
+
+.upload-progress-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
 }
 
 /* 顶部工作状态选择器 */
