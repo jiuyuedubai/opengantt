@@ -4,7 +4,7 @@
 [Frappe Gantt](https://github.com/frappe/gantt) 甘特图引擎，后端为 FastAPI + SQLAlchemy，
 数据 100% 存在你自己的数据库中，**不依赖任何付费服务或第三方 API**。
 
-![OpenGantt 主页界面](docs/screenshot-home.png)
+![OpenGantt 主页界面](docs/screenshots/home.png)
 
 ## 功能特性
 
@@ -53,6 +53,13 @@
 - **操作日志（审计）**：自动记录登录（含失败尝试）、项目/任务/文档增删改、账号与部门管理、
   密码变更等关键操作的操作人、类型、时间、对象、详情与来源 IP；支持按操作人、
   操作类型、时间范围筛选与分页查询（仅管理员可见；删除/重置密码等敏感操作红色标识）
+
+## 界面预览
+
+| 主页 | 任务与甘特排期 |
+|---|---|
+| ![主页](docs/screenshots/home.png) | ![甘特图排期](docs/screenshots/dept-gantt.png) |
+| ![驾驶舱](docs/screenshots/dashboard.png) | ![管理后台](docs/screenshots/admin.png) |
 
 ### 绩效考核与跨部门协作（管理员）
 - **绩效考核（AI 评分）**：考核模板库管理，基于任务投入度数据自动生成考核结果与评分建议，支持下载导出
