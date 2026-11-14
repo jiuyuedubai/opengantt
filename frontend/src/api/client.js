@@ -176,6 +176,8 @@ export const api = {
     });
   },
   deleteDocument: (docId) => request("DELETE", `/api/documents/${docId}`),
+  // 文档树多选删除（按 ID 列表，权限逐份校验）——注意必须是顶层方法（曾误落入 admin 子对象导致 undefined）
+  bulkDeleteDocIds: (ids) => request("POST", "/api/documents/bulk-delete-ids", { ids }),
   // 下载走 <a href> 由浏览器携带 Cookie 完成，无需 fetch
 
   // 进度记录与每日工作日志

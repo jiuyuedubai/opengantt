@@ -7,6 +7,7 @@
 """
 
 import datetime as dt
+from zoneinfo import ZoneInfo
 import logging
 import threading
 
@@ -16,6 +17,7 @@ from app import create_app
 from app.database import Base, SessionLocal, engine
 from app.holidays import is_push_workday
 from app.migrate import run_migrations
+from sqlalchemy import text
 from app.models import DailyReport
 from app.seed import seed
 from app.services import (
@@ -49,17 +51,30 @@ def _work_status_worker() -> None:
 
 
 def _daily_snapshot_worker() -> None:
-    """每日 17:30 自动保存：为所有任务补全当日进度快照 + 归档每个人的工作日志（幂等）。"""
+    """每日 17:30（Asia/Shanghai）自动保存：为所有任务补全当日进度快照 + 归档每个人的工作日志（幂等）。
+
+    JOB-001：触发后先抢占当日租约（job_runs 表唯一约束），多 Worker 下只有抢占成功的进程执行。
+    """
     import time as _time
 
+    tz = ZoneInfo("Asia/Shanghai")
     while True:
-        now = dt.datetime.now()
+        now = dt.datetime.now(tz)
         target = now.replace(hour=17, minute=30, second=0, microsecond=0)
         if target <= now:
             target += dt.timedelta(days=1)
         _time.sleep(max(60, (target - now).total_seconds()))
         try:
             with SessionLocal() as db:
+                # JOB-001：租约抢占（唯一约束），失败说明其他 Worker 已执行
+                lease = db.execute(
+                    text("INSERT OR IGNORE INTO job_runs (job_name, run_day) VALUES ('daily_snapshot', :d)"),
+                    {"d": now.date().isoformat()},
+                )
+                db.commit()
+                if lease.rowcount == 0:
+                    logger.info("每日归档租约已被其他 Worker 抢占，跳过")
+                    continue
                 count = save_daily_reports_for_today(db)
                 logger.info("每日自动保存：已归档 %d 份工作日志", count)
                 # 法定节假日/普通周末跳过简报推送（调休补班日照常）；日志归档不受影响
@@ -98,6 +113,12 @@ def _safe_migrate() -> None:
         try:
             Base.metadata.create_all(bind=engine)
             run_migrations()
+            from app.migrate import cleanup_orphan_rows
+
+            cleanup_orphan_rows()  # DATA-001：清理历史遗留的孤立子记录（幂等）
+            from app.services import cleanup_orphan_files
+
+            cleanup_orphan_files()  # DATA-002：清理无数据库记录的孤立上传文件（幂等）
             return
         except (OperationalError, IntegrityError) as exc:
             msg = str(exc).lower()

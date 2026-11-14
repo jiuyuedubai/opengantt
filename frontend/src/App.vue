@@ -178,18 +178,48 @@
     <template v-if="view === 'docs'">
       <nav class="crumb"><a href="/">主页</a><span>/</span><b>项目进度文档</b></nav>
 
-      <div class="og-panel-title">项目进度文档
+      <div class="og-panel-title docs-title">
+        <b>项目进度文档</b>
         <small>按「部门 → 成员 → 文档」三级浏览，点击行展开/收起；上传时文档归属于所选项目</small>
-        <span class="doc-date-filter">
-          📅 按上传日期筛选
-          <input type="date" v-model="docDateFilter" title="只显示该日期上传的文档" />
-          <button v-if="docDateFilter" class="mini" @click="docDateFilter = ''">清除筛选</button>
-          <small v-if="docDateFilter" class="muted">
-            筛选结果：{{ docFilterCount }} 份（部门 {{ filteredDocTree.length }} 个）
-          </small>
-        </span>
-        <button class="mini" style="margin-left: 12px" @click="openDocAccess">🔐 跨部门查询权限</button>
+        <button class="mini" style="margin-left: auto" @click="openDocAccess">🔐 跨部门查询权限</button>
       </div>
+
+      <!-- 工具条：筛选 / 批量操作（独立面板，与上传区、文档树并列） -->
+      <section class="panel doc-toolbar">
+        <div class="doc-toolbar-group">
+          <span class="doc-toolbar-label">📅 日期筛选</span>
+          <input type="date" v-model="docDateFilter" title="只显示该日期上传的文档" />
+          <button v-if="docDateFilter" class="mini" @click="docDateFilter = ''">清除</button>
+          <small v-if="docDateFilter" class="muted">
+            命中 {{ docFilterCount }} 份 · {{ filteredDocTree.length }} 个部门
+          </small>
+          <small v-else class="muted">未筛选（显示全部）</small>
+        </div>
+        <div class="doc-toolbar-divider"></div>
+        <div class="doc-toolbar-group" v-if="docDeletableCount">
+          <span class="doc-toolbar-label">🗑 批量删除</span>
+          <label
+            class="muted"
+            style="display: inline-flex; align-items: center; gap: 4px; cursor: pointer"
+            :title="docDateFilter ? '全选当前筛选结果中的可删除文档' : '请先用「日期筛选」缩小范围，再全选删除'"
+          >
+            <input
+              type="checkbox"
+              :checked="allVisibleSelected"
+              :disabled="!docDateFilter"
+              @change="toggleSelectAllVisible($event.target.checked)"
+            />
+            全选可删（{{ docDeletableCount }}）
+          </label>
+          <button
+            class="mini danger"
+            :disabled="!selectedDocIds.size"
+            title="删除勾选的文档"
+            @click="deleteSelectedDocs"
+          >删除所选（{{ selectedDocIds.size }}）</button>
+          <small v-if="!docDateFilter" class="muted">全选需先按日期筛选，防止误删全部文档</small>
+        </div>
+      </section>
 
       <!-- 跨部门查询权限：我的授权与申请 -->
       <section v-if="showDocAccess" class="panel" style="border: 1px solid var(--border); border-radius: 10px; padding: 12px">
@@ -268,6 +298,14 @@
               </div>
               <div v-if="expandedTree['e' + d.department_id + '-' + m.user_id]" class="dt-children">
                 <div v-for="doc in m.documents" :key="doc.id" class="dt-row dt-doc">
+                  <input
+                    v-if="doc.can_delete"
+                    type="checkbox"
+                    class="dt-check"
+                    :checked="selectedDocIds.has(doc.id)"
+                    @change="toggleDocSelect(doc, $event.target.checked)"
+                    @click.stop
+                  />
                   📄 <a :href="`/api/documents/${doc.id}/download`" target="_blank" rel="noopener">{{ doc.original_name }}</a>
                   <small>{{ doc.project_name }} · {{ fmtSize(doc.size) }} · {{ fmtDate(doc.uploaded_at) }}<template v-if="doc.note"> · {{ doc.note }}</template></small>
                   <button v-if="doc.can_delete" class="mini danger" @click.stop="removeDoc(doc)">删除</button>
@@ -1308,7 +1346,13 @@ function removeNewAssignee(uid) {
   newTask.assignee_ids = newTask.assignee_ids.filter((x) => x !== uid);
 }
 watch(showNewTask, (open) => {
-  if (open) assigneeDeptId.value = null; // 每次打开回到部门列表层
+  if (open) {
+    assigneeDeptId.value = null; // 每次打开回到部门列表层
+    // 普通员工（非管理员/主管）新建任务时，负责人默认勾选本人（仍可手动取消或改选他人）
+    if (currentUser.value.role === "employee") {
+      newTask.assignee_ids = [currentUser.value.id];
+    }
+  }
 });
 
 async function createTask() {
@@ -1571,6 +1615,70 @@ const filteredDocTree = computed(() => {
 const docFilterCount = computed(() =>
   filteredDocTree.value.reduce((s, d) => s + d.members.reduce((x, m) => x + m.documents.length, 0), 0)
 );
+
+// ---------- 多选删除（配合日期筛选：筛某天 → 全选 → 删除） ----------
+const selectedDocIds = ref(new Set());
+
+// 当前显示（含筛选）且本人有删除权限的文档
+const deletableVisibleDocs = computed(() => {
+  const list = [];
+  for (const d of filteredDocTree.value) {
+    for (const m of d.members) {
+      for (const doc of m.documents) {
+        if (doc.can_delete) list.push(doc);
+      }
+    }
+  }
+  return list;
+});
+
+const docDeletableCount = computed(() => deletableVisibleDocs.value.length);
+
+const allVisibleSelected = computed(
+  () =>
+    docDeletableCount.value > 0 &&
+    deletableVisibleDocs.value.every((d) => selectedDocIds.value.has(d.id))
+);
+
+function toggleDocSelect(doc, checked) {
+  const next = new Set(selectedDocIds.value);
+  if (checked) next.add(doc.id);
+  else next.delete(doc.id);
+  selectedDocIds.value = next;
+}
+
+function toggleSelectAllVisible(checked) {
+  const next = new Set();
+  if (checked) {
+    for (const d of deletableVisibleDocs.value) next.add(d.id);
+  }
+  selectedDocIds.value = next;
+}
+
+watch([docDateFilter, docTree], () => {
+  if (selectedDocIds.value.size) selectedDocIds.value = new Set(); // 数据刷新后清空选择
+});
+
+async function deleteSelectedDocs() {
+  const ids = [...selectedDocIds.value];
+  if (!ids.length) return;
+  if (!window.confirm(`⚠️ 确定删除已勾选的 ${ids.length} 份文档吗？\n删除后不可恢复（文件与记录一并移除）。`)) return;
+  // 大规模删除二次确认：超过 20 份需再确认一次，防止误删
+  if (ids.length > 20) {
+    if (!window.confirm(`⛔ 高危操作：即将删除 ${ids.length} 份文档（含他人的文档时请特别留意）。\n请再次确认是否继续。`)) return;
+  }
+  docBusy.value = true;
+  try {
+    const r = await api.bulkDeleteDocIds(ids);
+    toastRef.value?.showInfo(`已删除 ${r.deleted} 份文档，释放 ${r.freed_mb} MB`);
+    selectedDocIds.value = new Set();
+    await loadDocTree();
+  } catch (e) {
+    fail(e);
+  } finally {
+    docBusy.value = false;
+  }
+}
 
 // 进入文档中心（或项目权限变化）时自动选中第一个可编辑项目——
 // 否则 select 显示了项目名但 v-model 仍为 null，上传按钮会一直禁用（点击无反应）
@@ -2444,7 +2552,60 @@ onBeforeUnmount(() => {
   color: #f5222d;
 }
 
+/* 文档中心标题与工具条（重排后） */
+.docs-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.docs-title b {
+  font-size: 17px;
+}
+
+.doc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+}
+
+.doc-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.doc-toolbar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.doc-toolbar-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+}
+
 /* 文档中心日期筛选 */
+.doc-bulk-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 10px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+.dt-check {
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
 .doc-date-filter {
   display: inline-flex;
   align-items: center;
@@ -2695,14 +2856,25 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: 7px 10px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 13.5px;
+  transition: background 0.15s ease;
 }
 
 .dt-row:hover {
-  background: #f2f6fb;
+  background: #eef4fc;
+}
+
+.dt-check {
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.dt-doc a {
+  font-weight: 500;
 }
 
 .dt-l1 {

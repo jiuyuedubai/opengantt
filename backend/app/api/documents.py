@@ -12,6 +12,7 @@ from app.models import User
 from app.security import client_ip, get_current_user, require_roles
 from app.services import (
     _can_view_document,
+    bulk_delete_by_ids,
     bulk_delete_documents,
     bulk_document_stats,
     delete_document,
@@ -136,6 +137,27 @@ def remove_document(
 class BulkDeleteIn(BaseModel):
     user_id: int | None = Field(default=None, description="上传人 ID")
     date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="上传日期（本地）")
+
+
+class BulkDeleteIdsIn(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500, description="要删除的文档 ID 列表")
+
+
+@router.post("/documents/bulk-delete-ids", response_model=dict, summary="按 ID 列表批量删除文档（多选删除）")
+def bulk_delete_ids(
+    payload: BulkDeleteIdsIn,
+    request: Request,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    result = bulk_delete_by_ids(db, user, payload.ids)
+    record_audit(
+        db, user, "documents_bulk_delete_ids_log",
+        object_type="document", object_name=f"count={result['deleted']}",
+        detail=f"多选删除 {result['deleted']} 份文档（{result['freed_mb']} MB）",
+        ip=client_ip(request),
+    )
+    return result
 
 
 @router.get("/admin/documents/bulk-stats", response_model=dict, summary="批量删除前预览统计（管理员）")

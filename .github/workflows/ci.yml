@@ -1,0 +1,38 @@
+# TEST-001：CI 门禁（后端 pytest + 前端构建）
+# 触发：推送到 main / 所有 PR
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装依赖
+        run: |
+          pip install -r backend/requirements.txt
+          pip install -r backend/requirements-dev.txt
+      - name: 运行后端测试（含覆盖率）
+        working-directory: backend
+        run: pytest tests/ -W ignore --cov=app --cov-report=term-missing --cov-fail-under=50
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 安装依赖
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+      - name: 前端生产构建
+        working-directory: frontend
+        run: npm run build

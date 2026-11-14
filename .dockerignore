@@ -1,0 +1,16 @@
+# SEC-002：防止真实数据与密钥进入构建上下文/镜像
+backend/data/
+backend/.venv/
+backend/**/__pycache__/
+frontend/node_modules/
+frontend/dist/
+.workbuddy/
+.idea/
+.git/
+*.log
+*.db
+*.tgz
+*.zip
+.DS_Store
+运行管理中心用户手册.pdf
+docs/

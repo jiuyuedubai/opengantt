@@ -71,6 +71,17 @@ def list_users(db: Session = Depends(get_db)):
     return [_user_out(db, u) for u in users]
 
 
+def _ensure_not_last_active_admin(db: Session, user_id: int) -> None:
+    """账号不变式（AUTH-004）：任何操作都不能产生"零有效管理员"状态。"""
+    others = db.execute(
+        select(func.count(User.id)).where(
+            User.role == "admin", User.is_active == True, User.id != user_id  # noqa: E712
+        )
+    ).scalar() or 0
+    if others == 0:
+        raise ValidationError("系统至少需要保留一名有效管理员，请先启用或创建其他管理员")
+
+
 @router.post("/users", response_model=dict, status_code=201, summary="创建账号")
 def create_user(
     payload: AdminUserCreate,
@@ -126,6 +137,8 @@ def update_user(
         user.display_name = payload.display_name
         changed.append("姓名")
     if payload.role is not None:
+        if user.role == "admin" and payload.role != "admin":
+            _ensure_not_last_active_admin(db, user.id)  # 降级最后一个管理员同样会产生零管理员状态
         user.role = payload.role
         changed.append("角色")
     if payload.department_ids is not None:
@@ -163,6 +176,8 @@ def update_user(
     if payload.is_active is not None:
         if user.id == admin.id and not payload.is_active:
             raise ValidationError("不能停用自己的账号")
+        if user.role == "admin" and not payload.is_active:
+            _ensure_not_last_active_admin(db, user.id)  # 防止产生零管理员状态
         user.is_active = payload.is_active
         changed.append("启用" if payload.is_active else "停用")
     db.commit()
@@ -207,6 +222,8 @@ def delete_user(user_id: int, request: Request, db: Session = Depends(get_db), a
     ).scalar()
     if owned:
         raise ValidationError(f"该账号负责 {owned} 个项目，请先移交项目再删除")
+    if user.role == "admin" and user.is_active:
+        _ensure_not_last_active_admin(db, user.id)  # 防止删除最后一个有效管理员
     username, display = user.username, user.display_name or user.username
     db.execute(
         Document.__table__.update().where(Document.uploader_id == user_id).values(uploader_id=None)

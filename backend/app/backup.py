@@ -14,6 +14,7 @@ import sqlite3
 from pathlib import Path
 
 from app.config import DATA_DIR, settings
+from app.database import engine
 
 logger = logging.getLogger("opengantt.backup")
 
@@ -144,6 +145,7 @@ def restore_backup(filename: str) -> dict:
         "数据回退完成：恢复到 %s（v%s），回退前快照 %s",
         filename, m.group(3), pre["filename"],
     )
+    engine.dispose()  # 恢复覆盖了库文件：清空连接池，避免旧连接读到过期页面
     return {
         "restored": filename,
         "version": int(m.group(3)),

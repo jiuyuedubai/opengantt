@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.errors import ValidationError
 from app.models import User
 from app.schemas import ChangePasswordIn, LoginIn, UserOut
 from app.security import (
@@ -39,9 +40,25 @@ def _user_out(db: Session, user: User) -> dict:
     }
 
 
+# SEC-001 登录限速：按 用户名+IP 限 5 次/5 分钟（内存实现，重启即清零；多 Worker 各自独立计数）
+_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+_LOGIN_LIMIT, _LOGIN_WINDOW = 5, 300.0
+
+
+def _check_login_rate(key: str) -> None:
+    import time as _time
+
+    now = _time.time()
+    bucket = [t for t in _LOGIN_ATTEMPTS.get(key, []) if now - t < _LOGIN_WINDOW]
+    if len(bucket) >= _LOGIN_LIMIT:
+        raise ValidationError("登录尝试过于频繁，请 5 分钟后再试")
+    _LOGIN_ATTEMPTS[key] = bucket + [now]
+
+
 @router.post("/login", response_model=UserOut, summary="账号密码登录")
 def login(payload: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
     ip = client_ip(request)
+    _check_login_rate(f"{payload.username}|{client_ip(request)}")
     user = db.execute(select(User).where(User.username == payload.username)).scalar_one_or_none()
     if user is None or not verify_password(payload.password, user.password_hash):
         # 审计：失败尝试也记录（安全追溯），不泄露密码本身

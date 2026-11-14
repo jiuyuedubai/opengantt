@@ -89,6 +89,8 @@ class Settings:
     JWT_SECRET: str = _get_jwt_secret()
     JWT_ALGORITHM: str = "HS256"
     TOKEN_EXPIRE_DAYS: int = int(os.getenv("TOKEN_EXPIRE_DAYS", "7"))
+    # SEC-001：HTTPS 部署时应设 COOKIE_SECURE=true（本地 HTTP 预览保持 false）
+    COOKIE_SECURE: bool = os.getenv("COOKIE_SECURE", "false").strip().lower() in ("1", "true", "yes")
     COOKIE_NAME: str = "og_token"
 
     # 上传

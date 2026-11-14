@@ -394,17 +394,18 @@
         <table class="data-table">
           <thead><tr><th>员工</th><th>文件名</th><th>大小</th><th>上传时间</th><th style="width: 150px">操作</th></tr></thead>
           <tbody>
-            <tr v-if="!perfTemplates.length"><td colspan="5" class="empty-tip">暂无考核表模板</td></tr>
-            <tr v-for="t in perfTemplates" :key="t.id">
-              <td>{{ t.user_name }}</td>
-              <td class="mono" :title="t.original_name">{{ t.original_name }}</td>
-              <td>{{ (t.size / 1024).toFixed(1) }} KB</td>
-              <td class="mono">{{ t.uploaded_at }}</td>
+            <tr v-if="!perfTplUser"><td colspan="5" class="empty-tip">请先在上方选择员工，这里将显示其考核表模板状态</td></tr>
+            <tr v-else-if="perfTplForSelected">
+              <td>{{ perfTplForSelected.user_name }}</td>
+              <td class="mono" :title="perfTplForSelected.original_name">{{ perfTplForSelected.original_name }}</td>
+              <td>{{ (perfTplForSelected.size / 1024).toFixed(1) }} KB</td>
+              <td class="mono">{{ perfTplForSelected.uploaded_at }}</td>
               <td>
-                <a class="mini" :href="`/api/admin/performance/templates/${t.id}/download`">下载</a>
-                <button class="mini danger" @click="removePerfTpl(t)">删除</button>
+                <a class="mini" :href="`/api/admin/performance/templates/${perfTplForSelected.id}/download`">下载</a>
+                <button class="mini danger" @click="removePerfTpl(perfTplForSelected)">删除</button>
               </td>
             </tr>
+            <tr v-else><td colspan="5" class="empty-tip">该员工尚未上传考核表模板——选择文件后点「上传/替换考核表」</td></tr>
           </tbody>
         </table>
 
@@ -776,6 +777,11 @@ const perfSelected = ref([]);
 const perfPeriod = ref(new Date().toISOString().slice(0, 7));
 
 const perfUsers = computed(() => users.value.filter((u) => u.is_active));
+// 选中员工的模板视图：切换人员即时联动（全量数据已在 perfTemplates，纯前端过滤）
+const perfTplForSelected = computed(() => {
+  if (!perfTplUser.value) return null;
+  return perfTemplates.value.find((t) => t.user_id === perfTplUser.value) || null;
+});
 const perfPickUsers = computed(() => {
   const kw = perfSearch.value.trim().toLowerCase();
   return perfUsers.value.filter(

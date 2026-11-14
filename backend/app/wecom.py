@@ -312,13 +312,33 @@ def send_wecom_markdown(md: str, url: str | None = None) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
+# 任务提醒部门白名单：仅这些部门的新任务提醒会推送到企微群。
+# 其他部门 Webhook 未配置（当前统一使用商务运营部群），先关闭避免误发；
+# 接入新部门 Webhook 后在此集合加入部门名即可。
+REMIND_ENABLED_DEPARTMENTS = {"商务运营部"}
+
+
 def send_task_remind(db: Session, task: Task, project: Project) -> dict:
     """发送新任务提醒到企微群（text 消息，按手机号 @负责人）。
 
     - 负责人取 task_assignees 关联账号；旧数据无关联时回退 assignee 文本（仅展示不 @）
     - 账号配置了 wecom_mobile 才能被真正 @（企微机器人仅支持 userid/手机号两种 @ 方式）
     - 未配置 webhook 时静默跳过；任何网络失败返回结构化结果不抛出
+    - 仅对 REMIND_ENABLED_DEPARTMENTS 中的部门发送（其他部门 Webhook 未配置，
+      避免其提醒误入商务运营部群；接入新部门 Webhook 时在此集合扩展）
     """
+    dept_name = ""
+    if project.department_id is not None:
+        dept = db.get(Department, project.department_id)
+        dept_name = dept.name if dept else ""
+    if dept_name not in REMIND_ENABLED_DEPARTMENTS:
+        label = dept_name or "未分部门"
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": f"「{label}」的任务提醒通道暂未配置（Webhook），提醒未发送",
+        }
+
     url = settings.WECOM_REMIND_WEBHOOK_URL or settings.WECOM_WEBHOOK_URL
     if not url:
         return {"ok": False, "skipped": True, "reason": "未配置企微 Webhook，提醒未发送"}

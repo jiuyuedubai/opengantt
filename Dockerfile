@@ -29,8 +29,10 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY backend/ ./backend/
 COPY --from=frontend-builder /build/dist/ ./frontend/dist/
 
-# SQLite 数据文件目录（挂载卷即可持久化）
-RUN mkdir -p /app/backend/data
+# SQLite 数据文件目录（挂载卷即可持久化）；SEC-002：使用非 root 用户运行
+RUN mkdir -p /app/backend/data && useradd -u 1000 -m appuser && chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 8000
 

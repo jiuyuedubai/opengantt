@@ -146,7 +146,7 @@ class LoginIn(BaseModel):
 
 class ChangePasswordIn(BaseModel):
     old_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class UserOut(BaseModel):
@@ -196,7 +196,7 @@ class DailyTaskUpdate(BaseModel):
 
 class AdminUserCreate(BaseModel):
     username: str = Field(min_length=2, max_length=60, pattern=r"^[A-Za-z0-9_.-]+$")
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
     display_name: str = Field(default="", max_length=60)
     role: str = Field(pattern=r"^(admin|supervisor|employee)$")
     department_id: int | None = None
@@ -224,7 +224,7 @@ class AdminUserUpdate(BaseModel):
 
 
 class ResetPasswordIn(BaseModel):
-    new_password: str = Field(min_length=6, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 # ---------- 部门 ----------

@@ -7,7 +7,7 @@ import logging
 
 from sqlalchemy import inspect, text
 
-from app.database import engine
+from app.database import SessionLocal, engine
 
 logger = logging.getLogger("opengantt.migrate")
 
@@ -210,3 +210,24 @@ def run_migrations() -> None:
             )
             if backfilled.rowcount:
                 logger.info("迁移：回填 %d 条用户部门到 user_departments", backfilled.rowcount)
+
+
+def cleanup_orphan_rows() -> dict:
+    """清理历史遗留的孤立子记录（DATA-001）：任务删除后未级联清理的关联行。
+
+    幂等：无孤立行时为空操作。在启动迁移阶段执行一次。
+    """
+    with SessionLocal() as db:
+        counts = {}
+        for table in ("progress_logs", "task_assignees", "task_status_logs", "task_notes"):
+            res = db.execute(
+                text(
+                    f"DELETE FROM {table} WHERE task_id NOT IN (SELECT id FROM tasks)"  # noqa: S608
+                )
+            )
+            if res.rowcount:
+                counts[table] = res.rowcount
+        db.commit()
+        if counts:
+            logger.warning("已清理孤立子记录：%s", counts)
+        return counts

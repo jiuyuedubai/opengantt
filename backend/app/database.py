@@ -20,6 +20,17 @@ engine = create_engine(
     pool_pre_ping=True,
 )
 
+# SQLite 默认不启用外键强制（DATA-001）：连接级开启，配合模型中的 ondelete=CASCADE 级联删除
+if settings.DATABASE_URL.startswith("sqlite"):
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_fk_pragma(dbapi_conn, _record):  # noqa: ANN001
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
 

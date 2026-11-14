@@ -8,4 +8,8 @@ import "./style.css";
 const path = window.location.pathname;
 const isAdminPage = path.startsWith("/admin");
 const isDashboardPage = path.startsWith("/dashboard");
+// 构建版本标识：报错排查时先看 console 里的构建时间与页面是否匹配（旧标签页/缓存会显示旧时间）
+console.log(
+  `[OpenGantt] frontend build ${__BUILD_TIME__} — 若与最近部署时间不符，请强制刷新（Ctrl+Shift+R）`
+);
 createApp(isAdminPage ? AdminApp : isDashboardPage ? DashboardApp : App).mount("#app");

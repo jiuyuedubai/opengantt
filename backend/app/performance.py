@@ -173,11 +173,17 @@ def _compute_metrics(db: Session, user_id: int, start: str, end: str) -> dict:
     }
 
 
-def _doc_metrics(db: Session, user_id: int) -> dict:
-    """扫描该员工上传的全部文档产出（含压缩包解压展开后的文件）。"""
-    docs = db.execute(
-        select(Document).where(Document.uploader_id == user_id).order_by(Document.id.desc())
-    ).scalars().all()
+def _doc_metrics(db: Session, user_id: int, end: str | None = None) -> dict:
+    """扫描该员工的文档产出（含压缩包解压展开后的文件）。
+
+    FUNC-001：传入周期 end 时按 uploaded_at <= 周期末过滤，保证历史周期考核
+    不会被后续上传污染（相同历史周期重复生成结果一致）。
+    """
+    stmt = select(Document).where(Document.uploader_id == user_id)
+    if end:
+        end_dt = dt.datetime.fromisoformat(f"{end}T23:59:59")  # UTC 存储，取周期末当天全天
+        stmt = stmt.where(Document.uploaded_at <= end_dt)
+    docs = db.execute(stmt.order_by(Document.id.desc())).scalars().all()
     total = len(docs)
     total_size = sum(d.size for d in docs)
     from_archive = sum(1 for d in docs if "来自压缩包" in (d.note or ""))
@@ -283,7 +289,7 @@ def generate_results(db: Session, admin: User, user_ids: list[int], period: str,
             continue
         name = user.display_name or user.username
         m = _compute_metrics(db, uid, start, end)
-        dm = _doc_metrics(db, uid)
+        dm = _doc_metrics(db, uid, end=end)
         tpl = db.execute(
             select(PerformanceTemplate).where(PerformanceTemplate.user_id == uid)
         ).scalar_one_or_none()

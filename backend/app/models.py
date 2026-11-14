@@ -340,3 +340,16 @@ class PerformanceResult(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utc_now, index=True)
 
     user: Mapped[User | None] = relationship(foreign_keys=[user_id])
+
+
+class JobRun(Base):
+    """后台定时任务租约（JOB-001）：多 Worker 下按 (job_name, run_day) 唯一约束抢占，
+    抢占成功的进程执行任务，其余跳过——保证每日任务只执行一次。"""
+
+    __tablename__ = "job_runs"
+    __table_args__ = (UniqueConstraint("job_name", "run_day", name="uq_job_run_name_day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    job_name: Mapped[str] = mapped_column(String(60), nullable=False)
+    run_day: Mapped[str] = mapped_column(String(10), nullable=False)
+    ran_at: Mapped[dt.datetime] = mapped_column(DateTime, default=utc_now)

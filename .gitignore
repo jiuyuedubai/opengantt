@@ -21,3 +21,7 @@ backend/.env
 # 系统/编辑器
 .DS_Store
 *.log
+
+# SEC-002/.dockerignore 同步：敏感与生成物不入库（补全既有规则）
+backend/.venv/
+*.tgz

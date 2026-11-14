@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.errors import ValidationError
+from app.errors import NotFoundError, PermissionDeniedError, ValidationError
 from app.models import User
 from app.schemas import TaskBulkUpdate, TaskCreate, TaskOut, TaskUpdate
 from app.security import client_ip, get_current_user
@@ -15,6 +15,7 @@ from app.services import (
     create_task,
     delete_task,
     ensure_can_edit_task,
+    _blocked_reason_for,
     ensure_can_view_project,
     get_project,
     list_progress_logs,
@@ -117,8 +118,17 @@ def patch_tasks_bulk(
     summary="任务详情",
 )
 def get_task(project_id: int, task_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    get_project(db, project_id)
-    return _resolve_task(db, project_id, task_id)
+    project = get_project(db, project_id)
+    # 权限边界：无项目可见权时统一返回 404，不暴露任务存在性
+    try:
+        ensure_can_view_project(db, user, project)
+    except PermissionDeniedError:
+        raise NotFoundError("任务不存在")
+    task = _resolve_task(db, project_id, task_id)
+    out = TaskOut.model_validate(task)
+    if out.status == "blocked":
+        out.blocked_reason = _blocked_reason_for(db, task.id)
+    return out
 
 
 @router.patch(

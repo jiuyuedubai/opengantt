@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.database import SessionLocal
 from app.errors import DependencyCycleError, NotFoundError, PermissionDeniedError, ValidationError
 from app.models import (
     AuditLog,
@@ -371,8 +372,20 @@ def delete_project(db: Session, user: User, project_id: int) -> None:
     project = get_project(db, project_id)
     if user.role != "admin" and project.owner_id != user.id:
         raise PermissionDeniedError("只有管理员或项目负责人可以删除项目")
+    # DATA-002：删除前先记录文档物理文件路径（记录由 FK CASCADE 随项目级联删除），
+    # 提交后再逐个删除物理文件，失败仅记日志由孤立文件清理兜底
+    doc_paths = [
+        settings.UPLOAD_DIR / d.stored_name
+        for d in db.execute(select(Document).where(Document.project_id == project.id)).scalars()
+        if (settings.UPLOAD_DIR / d.stored_name).is_file()
+    ]
     db.delete(project)
     db.commit()
+    for path in doc_paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("项目文档物理文件删除失败（将由孤立文件清理兜底）%s：%s", path, exc)
 
 
 # ---------- 任务 ----------
@@ -467,8 +480,13 @@ def create_task(db: Session, user: User, project_id: int, payload: TaskCreate) -
     )
     db.add(task)
     db.flush()  # 取得 task.id，负责人关联表需要
-    if payload.assignee_ids:
-        _apply_assignees(db, task, payload.assignee_ids, operator=user)
+    # 普通员工新建任务默认负责人=本人（前端默认勾选的后端兜底，防止漏传导致任务无负责人；
+    # 管理员/主管保持显式选择，不受影响）
+    assignee_ids = payload.assignee_ids
+    if user.role == "employee" and not assignee_ids:
+        assignee_ids = [user.id]
+    if assignee_ids:
+        _apply_assignees(db, task, assignee_ids, operator=user)
     db.commit()
     return task
 
@@ -516,6 +534,19 @@ def _apply_status_change(db: Session, user: User, task: Task, old_status: str, c
             reason=(change.status_reason or change.note or "")[:500],
         )
     )
+    if new_status == "cancelled":
+        # 取消后同步归档日报：该任务取消日及之后的已归档日志重算，阻塞/进行中记录随之清除
+        try:
+            _refresh_archived_reports_for_task(db, task)
+        except Exception as exc:  # noqa: BLE001  归档刷新是旁路行为，不影响主流程
+            logger.warning("取消任务后归档日报刷新失败 task=%s：%s", task.id, exc)
+    else:
+        # 其他状态变化（如转阻塞/恢复/完成）：变更日（今天）起的归档按新状态刷新，
+        # 保证"转阻塞后日志同步显示阻塞、解除后同步消失"
+        try:
+            _refresh_archived_reports_for_task(db, task, from_day=_today_str())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("状态变更后归档日报刷新失败 task=%s：%s", task.id, exc)
 
 
 def update_task(db: Session, user: User, project_id: int, task_id: int, payload: TaskUpdate) -> Task:
@@ -834,11 +865,16 @@ def delete_document(db: Session, user: User, document_id: int) -> None:
     project = get_project(db, doc.project_id)
     if not (user.role == "admin" or doc.uploader_id == user.id or can_edit_project(db, user, project)):
         raise PermissionDeniedError("没有删除该文档的权限")
-    path = settings.UPLOAD_DIR / doc.stored_name
-    if path.is_file():
-        path.unlink(missing_ok=True)
+    # DATA-002：先提交数据库，再删物理文件——文件删除失败只记日志（由孤立文件清理兜底），
+    # 避免"文件已删但记录还在"导致下载 404
     db.delete(doc)
     db.commit()
+    path = settings.UPLOAD_DIR / doc.stored_name
+    if path.is_file():
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("文档物理文件删除失败（将由孤立文件清理兜底）%s：%s", path, exc)
 
 
 # ---------- 管理员批量删除（按上传人/上传日期筛选；本地日期=UTC+8） ----------
@@ -910,6 +946,37 @@ def bulk_document_stats(db: Session, user_id: int | None, local_date: str | None
         "user_name": (target.display_name or target.username) if target else "全部上传人",
         "date": local_date or "不限",
     }
+
+
+def bulk_delete_by_ids(db: Session, user: User, doc_ids: list[int]) -> dict:
+    """按 ID 列表批量删除文档（文档树多选删除）：逐份校验删除权限，返回删除数量与释放空间。"""
+    if not doc_ids:
+        raise ValidationError("未选择任何文档")
+    if len(doc_ids) > 500:
+        raise ValidationError("单次最多删除 500 份文档")
+    removed, freed = 0, 0
+    for doc_id in doc_ids:
+        doc = db.get(Document, doc_id)
+        if doc is None:
+            continue
+        project = get_project(db, doc.project_id)
+        if not (user.role == "admin" or doc.uploader_id == user.id or can_edit_project(db, user, project)):
+            raise PermissionDeniedError(f"没有删除文档「{doc.original_name}」的权限")
+        f = settings.UPLOAD_DIR / doc.stored_name
+        if f.is_file():
+            f.unlink(missing_ok=True)
+        db.delete(doc)
+        removed += 1
+        freed += doc.size
+    record_audit(
+        db, user, "documents_bulk_delete_ids",
+        object_type="document", object_name=f"ids={len(doc_ids)}",
+        detail=f"多选批量删除 {removed} 份文档（{freed / 1024 / 1024:.1f} MB）",
+        ip="",
+    )
+    db.commit()
+    logger.info("多选批量删除文档：%d 份，操作人 %s", removed, user.username)
+    return {"deleted": removed, "freed_mb": round(freed / 1024 / 1024, 1)}
 
 
 # ---------- 每日任务（周期清单，日期恒为当天；可分配多名成员） ----------
@@ -1410,7 +1477,27 @@ def generate_daily_report(db: Session, user: User, log_date: str) -> str:
             ).scalars().all()
             for s in srows:
                 blocked_reasons.setdefault(s.task_id, (s.reason or "").strip())
+    # 已取消任务的取消日期：取消日及之后的日志不再展示该任务
+    # （状态同步：取消后其"进行中/阻塞/次日待办"记录随之清除；取消日之前的历史日志保留原状）
+    cancelled_dates = {}
+    if logs:
+        cancelled_ids = [t.id for _, t in logs if t.status == "cancelled"]
+        if cancelled_ids:
+            crows = db.execute(
+                select(TaskStatusLog.task_id, TaskStatusLog.created_at)
+                .where(
+                    TaskStatusLog.task_id.in_(cancelled_ids),
+                    TaskStatusLog.to_status == "cancelled",
+                )
+                .order_by(TaskStatusLog.created_at.desc(), TaskStatusLog.id.desc())
+            ).all()
+            for tid, cat in crows:
+                cancelled_dates.setdefault(tid, cat)  # 最新一次取消时间
     for log, task in logs:
+        if task.status == "cancelled":
+            cat = cancelled_dates.get(task.id)
+            if cat is None or log_date >= cat.date().isoformat():
+                continue  # 取消日及之后（或无取消记录的旧数据）：跳过，不进任何段落
         label = f"{task.name} —— 进度 {log.progress}%"
         # 多行说明压平为单行（以；分隔），避免打断日志的行结构
         note = "；".join(s for s in (my_notes.get(task.id) or "").splitlines() if s.strip())
@@ -1489,6 +1576,104 @@ def generate_daily_report(db: Session, user: User, log_date: str) -> str:
         f"💡 OpenGantt 自动生成于 {dt.datetime.now().strftime('%Y-%m-%d %H:%M')}，星期{weekday}",
     ]
     return "\n".join(lines)
+
+
+def _blocked_reason_for(db: Session, task_id: int) -> str:
+    """取任务最近一次"转阻塞"的原因（供任务详情/更新响应组装）。"""
+    row = db.execute(
+        select(TaskStatusLog.reason)
+        .where(TaskStatusLog.task_id == task_id, TaskStatusLog.to_status == "blocked")
+        .order_by(TaskStatusLog.created_at.desc(), TaskStatusLog.id.desc())
+        .limit(1)
+    ).first()
+    return (row[0] or "").strip() if row else ""
+
+
+def _refresh_archived_reports_for_task(db: Session, task: Task, from_day: str | None = None) -> int:
+    """任务状态变更后，重算受影响日期的已归档日报，保证日志与任务状态同步。
+
+    - `from_day=None`（取消语义）：从**取消日**起重算该任务出现过的 (user_id, log_date)，
+      取消日之前的历史日期保留原状（当时真实状态）。
+    - `from_day=某日期`（其他状态变化，如转阻塞/恢复）：从该日期起重算；同时并入
+      **全部负责人今天**的组合（状态变更日当天可能尚无 ProgressLog，但归档需按新状态刷新）。
+    """
+    db.flush()  # session autoflush=False：确保 pending 的状态日志/状态变更对本函数查询可见
+    if from_day is None:
+        row = db.execute(
+            select(TaskStatusLog.created_at)
+            .where(TaskStatusLog.task_id == task.id, TaskStatusLog.to_status == "cancelled")
+            .order_by(TaskStatusLog.created_at.desc(), TaskStatusLog.id.desc())
+            .limit(1)
+        ).first()
+        if row is None:
+            return 0
+        from_day = row[0].date().isoformat()
+    # 受影响组合 = 该任务出现过的 (user_id, log_date) + 全部负责人 × 今天（状态变更日）
+    pairs = set(
+        db.execute(
+            select(ProgressLog.user_id, ProgressLog.log_date)
+            .where(ProgressLog.task_id == task.id)
+            .distinct()
+        ).all()
+    )
+    owner_ids = set(
+        db.execute(select(TaskAssignee.user_id).where(TaskAssignee.task_id == task.id)).scalars()
+    )
+    if task.assignee_id:
+        owner_ids.add(task.assignee_id)
+    today = _today_str()
+    for uid in owner_ids:
+        pairs.add((uid, today))
+    changed = 0
+    user_cache: dict[int, User] = {}
+    for user_id, log_date in sorted(pairs):
+        if log_date < from_day:
+            continue
+        user = user_cache.get(user_id) or db.get(User, user_id)
+        user_cache[user_id] = user
+        if not user or not user.is_active:
+            continue
+        markdown = generate_daily_report(db, user, log_date)
+        existing = db.execute(
+            select(DailyReport).where(DailyReport.user_id == user_id, DailyReport.log_date == log_date)
+        ).scalar_one_or_none()
+        if existing:
+            existing.markdown = markdown
+            existing.saved_at = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+        else:
+            db.add(DailyReport(user_id=user_id, log_date=log_date, markdown=markdown))
+        changed += 1
+    db.commit()
+    return changed
+
+
+def cleanup_orphan_files() -> dict:
+    """DATA-002 兜底：扫描 uploads 目录，删除数据库无记录的孤立文件。
+
+    仅清理修改时间超过 1 小时的文件（避开上传中途失败的竞争窗口）。幂等。
+    """
+    removed, freed = 0, 0
+    with SessionLocal() as db:
+        known = set(db.execute(select(Document.stored_name)).scalars())
+        cutoff = dt.datetime.now().timestamp() - 3600
+        for path in settings.UPLOAD_DIR.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(settings.UPLOAD_DIR).as_posix()
+            if rel in known:
+                continue
+            if path.stat().st_mtime > cutoff:
+                continue
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                removed += 1
+                freed += size
+            except OSError:
+                pass
+    if removed:
+        logger.warning("孤立文件清理：删除 %d 个无记录文件，释放 %.1f MB", removed, freed / 1024 / 1024)
+    return {"removed": removed, "freed_mb": round(freed / 1024 / 1024, 1)}
 
 
 def save_daily_reports_for_today(db: Session) -> int:
@@ -2350,8 +2535,9 @@ def generate_weekly_report(db: Session, user: User, any_date: str) -> str:
 
     day_sections: list[tuple[str, dt.date]] = []
     overview: list[str] = []
-    problems: list[str] = []
+    blocked_agg: dict[str, dict] = {}  # 阻塞项按任务聚合（去重）
     plans: list[str] = []
+    day_plans: dict[str, str] = {}  # 每日次日待办的最新一条（按天覆盖）
     log_days = 0
     for day in days:
         md = generate_daily_report(db, user, day)
@@ -2365,14 +2551,26 @@ def generate_weekly_report(db: Session, user: User, any_date: str) -> str:
         for line in sec.get("一", []):
             if not line.startswith("（") and line not in overview:
                 overview.append(line)
+        # 阻塞项按任务聚合去重：同一任务多天阻塞只保留一条（首日/末日/最新原因）
         blocked_lines = sec.get("三", [])
         if blocked_lines and not blocked_lines[0].startswith("（无"):
-            problems.append(f"【{day}】")
-            problems.extend(f"  {x}" for x in blocked_lines)
+            for line in blocked_lines:
+                m = re.match(r"⚠️ (.+?) —— 进度 (\d+)%，阻塞原因：(.+)$", line.strip())
+                if m:
+                    name, progress, reason = m.group(1).strip(), m.group(2), m.group(3).strip()
+                    item = blocked_agg.setdefault(
+                        name, {"reason": reason, "first": day, "last": day, "days": 0, "progress": progress}
+                    )
+                    item["last"] = day
+                    item["days"] += 1
+                    item["reason"] = reason  # 以最新一次填写的原因为准
+                    item["progress"] = progress
         for line in sec.get("六", []):
             cleaned = re.sub(r"^\d+\.\s*", "", line).strip()
-            if cleaned and not cleaned.startswith("（无") and cleaned not in plans:
-                plans.append(cleaned)
+            if cleaned and not cleaned.startswith("（无"):
+                # 逐日收集：取"最近一次有记录"的次日待办（该日状态最接近当前），
+                # 避免同一任务多天出现、进度数字互相矛盾
+                day_plans.setdefault(day, []).append(cleaned)
 
     # 一、本周工作概览：完成项合并 + 概况统计
     first, last = days[0], days[-1]
@@ -2393,26 +2591,47 @@ def generate_weekly_report(db: Session, user: User, any_date: str) -> str:
         "",
         "二、每日工作明细（日期、工作内容、完成情况）",
     ]
+    # 每日明细中阻塞任务的长原因折叠为引用，避免与阻塞项段重复
+    blocked_cite_pattern = re.compile(r"，阻塞原因：.+$")
     for day, sec in day_sections:
         d_obj = dt.date.fromisoformat(day)
         lines.append(f"【{day}（星期{_WEEKDAY_CN[d_obj.weekday()]}）】")
-        day_lines = sec.get("一", []) + sec.get("二", [])
+        day_lines = sec.get("一", []) + [
+            blocked_cite_pattern.sub("（阻塞中，详见「三、遇到的问题」）", x) for x in sec.get("二", [])
+        ]
         body = [x for x in day_lines if x.strip()]
         if body:
             lines.extend(f"  {x}" for x in body)
         else:
             lines.append("  （当日无任务进度记录）")
         lines.append("")
-    lines += ["三、遇到的问题及解决方案"]
-    if problems:
-        lines.extend(f"· {x}" for x in problems)
-        lines.append("  （解决方案见各阻塞原因描述；已解决的任务已计入完成项）")
+    lines += ["三、遇到的问题及解决方案（同一阻塞任务已合并去重）"]
+    if blocked_agg:
+        for name, info in blocked_agg.items():
+            span = info["first"] if info["first"] == info["last"] else f"{info['first']} ~ {info['last']}"
+            lines.append(
+                f"· ⚠️ {name} —— 进度 {info['progress']}%\n"
+                f"    阻塞原因：{info['reason']}\n"
+                f"    阻塞期间：{span}（本周累计 {info['days']} 天）"
+            )
+        lines.append("  （原因以最近一次填写为准；已解除阻塞的任务不再列出，其过程见每日明细）")
     else:
         lines.append("· 本周无阻塞或待协调事项")
+    # 下周计划：取最近一次有记录工作日的次日待办（进度状态最接近当前），按任务名去重
+    last_plan_day = max(day_plans.keys(), default=None)
+    seen_names: set[str] = set()
+    plans: list[str] = []
+    if last_plan_day:
+        for item in day_plans[last_plan_day]:
+            name = re.sub(r" —— 当前进度.*$", "", item).strip()
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            plans.append(item)
     plans_lines = [f"{i + 1}. {x}" for i, x in enumerate(plans[:15])] if plans else ["（本周未记录次日待办）"]
     lines += [
         "",
-        "四、下周工作计划（按本周最后记录的次日待办合并）",
+        f"四、下周工作计划（取最近一次工作日志 {last_plan_day or '—'} 的次日待办，进度为该日状态）",
         *plans_lines,
         "",
         divider,
